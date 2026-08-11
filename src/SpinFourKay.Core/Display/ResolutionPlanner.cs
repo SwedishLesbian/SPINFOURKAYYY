@@ -9,8 +9,11 @@ public sealed class ResolutionPlanner
 {
     private const double MinimumScale = 1.0;
     private const double MaximumScale = 4.0;
-    private const int MinimumWidth = 640;
-    private const int MinimumHeight = 480;
+    // EverQuest's stock character-select canvas is 800x600. Allowing the
+    // rendered client below that size can clip or misplace controls such as
+    // Enter World before a character UI layout has even loaded.
+    public const int MinimumInteractiveWidth = 800;
+    public const int MinimumInteractiveHeight = 600;
 
     private static readonly ReadOnlyCollection<ResolutionPreset> KnownPresets =
         new List<ResolutionPreset>
@@ -36,8 +39,8 @@ public sealed class ResolutionPlanner
         }.AsReadOnly();
 
     private readonly IReadOnlyList<ResolutionPreset> _presets = KnownPresets;
-    private readonly int _minimumWidth = MinimumWidth;
-    private readonly int _minimumHeight = MinimumHeight;
+    private readonly int _minimumWidth = MinimumInteractiveWidth;
+    private readonly int _minimumHeight = MinimumInteractiveHeight;
 
     public IReadOnlyList<ResolutionPreset> Presets => _presets;
 
@@ -91,11 +94,18 @@ public sealed class ResolutionPlanner
                 $"UI scale must be between {MinimumScale:0.#} and {MaximumScale:0.#}.");
         }
 
-        int width = RoundToEven(target.Width / desiredUiScale);
-        int height = RoundToEven(target.Height / desiredUiScale);
+        int minimumWidth = Math.Min(_minimumWidth, target.Width);
+        int minimumHeight = Math.Min(_minimumHeight, target.Height);
+        double maximumSafeScale = Math.Min(
+            (double)target.Width / minimumWidth,
+            (double)target.Height / minimumHeight);
+        double effectiveUiScale = Math.Min(desiredUiScale, maximumSafeScale);
 
-        width = Math.Clamp(width, Math.Min(_minimumWidth, target.Width), target.Width);
-        height = Math.Clamp(height, Math.Min(_minimumHeight, target.Height), target.Height);
+        int width = RoundToEven(target.Width / effectiveUiScale);
+        int height = RoundToEven(target.Height / effectiveUiScale);
+
+        width = Math.Clamp(width, minimumWidth, target.Width);
+        height = Math.Clamp(height, minimumHeight, target.Height);
 
         // Nearest-neighbor is useful only when every source pixel maps to an exact block.
         if (filter == ScalingFilter.NearestNeighbor)
@@ -108,8 +118,8 @@ public sealed class ResolutionPlanner
                 int exactHeight = target.Height / integerScale;
                 if (target.Width % integerScale == 0
                     && target.Height % integerScale == 0
-                    && exactWidth >= Math.Min(_minimumWidth, target.Width)
-                    && exactHeight >= Math.Min(_minimumHeight, target.Height))
+                    && exactWidth >= minimumWidth
+                    && exactHeight >= minimumHeight)
                 {
                     width = exactWidth;
                     height = exactHeight;

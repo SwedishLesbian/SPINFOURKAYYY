@@ -108,7 +108,10 @@ public partial class MainWindow : Window, IDisposable
         _overlayCompatibilityTimer = new DispatcherTimer(
             DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromMilliseconds(250),
+            // Magpie moves the physical cursor between its source and scaled
+            // surfaces. A short handoff cadence keeps overlay controls clickable
+            // without leaving an input-opaque shadow over EverQuest.
+            Interval = TimeSpan.FromMilliseconds(20),
         };
         _overlayCompatibilityTimer.Tick += OverlayCompatibilityTimer_Tick;
         _liveScaleDebounceTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -1208,22 +1211,25 @@ public partial class MainWindow : Window, IDisposable
             return;
         }
 
-        nint foregroundWindow = _foregroundWindow.GetForegroundWindowHandle();
-        WindowRuntimeSnapshot foregroundSnapshot =
-            _foregroundWindow.InspectWindow(foregroundWindow);
-        bool gameSessionIsForeground =
-            foregroundWindow == _activeLaunch.SourceWindow.Handle
-            || foregroundWindow == overlays.ScalingWindowHandle
-            || overlays.TracksWindow(foregroundWindow)
-            || (foregroundSnapshot.IsValid
-                && (foregroundSnapshot.ProcessId == _activeLaunch.GameProcess.Id
-                    || foregroundSnapshot.ProcessId
-                        == _activeLaunch.MagpieProcess.Process.Id));
-        OverlayCompatibilityUpdate update = _overlayCompatibility.Maintain(
-            overlays,
-            gameSessionIsForeground,
-            discoverNewWindows:
-                ++_overlayCompatibilityTickCount % 8 == 0);
+        int tick = ++_overlayCompatibilityTickCount;
+        bool regularMaintenance = tick % 12 == 0;
+        bool discoverNewWindows = tick % 100 == 0;
+        OverlayCompatibilityUpdate update;
+        if (regularMaintenance || discoverNewWindows)
+        {
+            nint foregroundWindow = _foregroundWindow.GetForegroundWindowHandle();
+            bool exactGameSessionIsForeground =
+                foregroundWindow == _activeLaunch.SourceWindow.Handle
+                || foregroundWindow == overlays.ScalingWindowHandle;
+            update = _overlayCompatibility.Maintain(
+                overlays,
+                exactGameSessionIsForeground,
+                discoverNewWindows);
+        }
+        else
+        {
+            update = _overlayCompatibility.RefreshInputHandoff(overlays);
+        }
         if (update.Warnings.Count > _displayedOverlayWarningCount)
         {
             string[] newWarnings = update.Warnings
@@ -1822,11 +1828,16 @@ public partial class MainWindow : Window, IDisposable
                 $"{FormatPixels(target)} native · original pixels";
             _spinUiPlans = [];
             _currentPlan = CreateSelectedPlan(target);
+            bool safelyLimited =
+                SelectedUiScale() - _currentPlan.ActualUiScale > 0.005;
             FineScaleUsageText.Text = _isScaledSessionActive
                 ? "Active — this session is using its fitted personal layout."
-                : _currentPlan.ActualUiScale > 1.005
-                    ? "Automatic — personal layouts are fitted before launch."
-                    : "Native pixels — no layout conversion is needed.";
+                : safelyLimited
+                    ? $"Safely limited to {FormatUiPercent(_currentPlan.ActualUiScale)} "
+                        + "so EverQuest's login controls stay usable."
+                    : _currentPlan.ActualUiScale > 1.005
+                        ? "Automatic — personal layouts are fitted before launch."
+                        : "Native pixels — no layout conversion is needed.";
             FineScaleValueText.Text =
                 FormatUiPercent(_currentPlan.ActualUiScale);
             FineScaleSourceText.Text =

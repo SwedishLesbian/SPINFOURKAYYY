@@ -44,7 +44,8 @@ public interface IWindowDiscoveryService
 
 public sealed class WindowDiscoveryService : IWindowDiscoveryService
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan PollInterval =
+        WindowInteractionReadinessPolicy.DiscoveryPollInterval;
 
     public IReadOnlyList<WindowDescriptor> FindVisibleWindows(int processId)
     {

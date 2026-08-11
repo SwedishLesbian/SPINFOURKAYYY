@@ -22,7 +22,10 @@ internal static class NativeMethods
     internal const uint SwpNoOwnerZOrder = 0x0200;
     internal const uint SwpFrameChanged = 0x0020;
     internal const uint EventSystemForeground = 0x0003;
+    internal const uint EventObjectShow = 0x8002;
     internal const uint EventObjectReorder = 0x8004;
+    internal const int ObjIdWindow = 0;
+    internal const int ChildIdSelf = 0;
     internal const uint WineventOutOfContext = 0x0000;
     internal const uint WsExTopmost = 0x00000008;
     internal const uint WsExTransparent = 0x00000020;
@@ -74,6 +77,13 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetCursorPos(out NativePoint point);
+
+    [DllImport("user32.dll")]
+    internal static extern nint WindowFromPoint(NativePoint point);
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
@@ -193,6 +203,18 @@ internal static class NativeMethods
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
     internal static extern int GetWindowLong32(nint windowHandle, int index);
 
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    internal static extern nint SetWindowLongPtr64(
+        nint windowHandle,
+        int index,
+        nint newValue);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    internal static extern int SetWindowLong32(
+        nint windowHandle,
+        int index,
+        int newValue);
+
     [DllImport("user32.dll")]
     internal static extern nint GetMenu(nint windowHandle);
 
@@ -295,5 +317,15 @@ internal static class NativeMethods
         return nint.Size == sizeof(long)
             ? GetWindowLongPtr64(windowHandle, index)
             : new nint(GetWindowLong32(windowHandle, index));
+    }
+
+    internal static nint SetWindowLongPtr(
+        nint windowHandle,
+        int index,
+        nint newValue)
+    {
+        return nint.Size == sizeof(long)
+            ? SetWindowLongPtr64(windowHandle, index, newValue)
+            : new nint(SetWindowLong32(windowHandle, index, newValue.ToInt32()));
     }
 }

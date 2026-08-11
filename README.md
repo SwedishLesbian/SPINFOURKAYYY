@@ -46,15 +46,22 @@ Your first launch at a new size may take a moment while the app prepares a match
 - **150% · Balanced** gives a noticeably larger and easier-to-read UI.
 - **200% · Comfort** provides the largest interface for maximum readability.
 
+On smaller displays, SpinFOURKAYYY may use the nearest safe percentage so EverQuest's sign-in and character-select controls remain fully usable.
+
 **Readable UI** is the recommended quality mode. If small text looks soft, leave anti-aliasing off and try a slightly larger size instead of adding more sharpening.
 
 Choose your settings before launching. To change size or quality later, exit EverQuest, select the new options, and start a fresh managed session.
 
 ## Companion overlays
 
-Leave **Keep companion overlays visible** enabled for Loremaster, DPS meters, and similar companion HUDs. SpinFOURKAYYY keeps recognized overlays above the scaled game without resizing their pixels, so their text remains native and sharp.
+Leave **Keep companion overlays visible** enabled for Loremaster, EQBuddy, EQ Legends Companion, and similar companion HUDs. SpinFOURKAYYY keeps recognized overlays above the scaled game without resizing their pixels, so their text remains native and sharp.
 
-For the best results, start the overlay before launching EverQuest and run the overlay, EverQuest, and SpinFOURKAYYY at the same Windows privilege level.
+Overlay controls stay clickable when you point at them, while hidden overlay areas are kept from blocking clicks in EverQuest.
+
+Supported overlays can open before or after scaling starts. Run the overlay, EverQuest, and SpinFOURKAYYY at the same Windows privilege level.
+
+If EQ Legends Companion is set to hide overlays when the game loses focus, turn that option off while using fullscreen scaling.
+SpinFOURKAYYY also leaves Companion's own lock and click-through controls in charge, so lock a panel when you are not editing it.
 
 ## Try SpinUI
 

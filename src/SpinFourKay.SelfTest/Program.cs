@@ -117,14 +117,26 @@ internal static class Program
         runner.Add("Windows / process discovery validation", ProcessDiscoveryValidationAsync);
         runner.Add("Windows / safe window discovery validation", WindowDiscoveryValidationAsync);
         runner.Add(
+            "Windows / managed-launch interaction readiness policy",
+            ManagedLaunchInteractionReadinessPolicyAsync);
+        runner.Add(
             "Windows / physical-monitor client placement planner",
             PhysicalMonitorClientPlacementPlanner);
         runner.Add(
             "Windows / native-size overlay placement and filtering",
             OverlayPlacementAndFiltering);
         runner.Add(
+            "Windows / 4K 125-percent overlay source-shadow mapping",
+            Overlay125PercentSourceShadowMapping);
+        runner.Add(
             "Windows / overlay promotion, discovery, and exact restoration",
             OverlayCompatibilityLifecycle);
+        runner.Add(
+            "Windows / EQ Legends Companion overlay lifecycle",
+            EqLegendsCompanionOverlayLifecycle);
+        runner.Add(
+            "Windows / overlay source-shadow input pass-through",
+            OverlayCompatibilityInputPassThrough);
         runner.Add(
             "Windows / overlay event recovery defeats topmost races",
             OverlayCompatibilityEventRecovery);
@@ -397,6 +409,17 @@ internal static class Program
             new FineUiScale(110).Factor,
             ScalingFilter.Fsr);
         Assert.Equal(new PixelSize(3128, 1310), subtleUltrawide.SourceResolution);
+
+        // The stock character-select window requires an 800x600 canvas. On a
+        // 720p display, 125% is therefore safely capped just under 120% while
+        // retaining the display aspect ratio instead of clipping Enter World.
+        ResolutionPlan laptopGentle = planner.CreateCustomPlan(
+            new PixelSize(1280, 720),
+            1.25,
+            ScalingFilter.Fsr);
+        Assert.Equal(new PixelSize(1068, 600), laptopGentle.SourceResolution);
+        Assert.True(laptopGentle.ActualUiScale > 1.19);
+        Assert.True(laptopGentle.ActualUiScale <= 1.20);
     }
 
     private static void FineUiScaleQuantizationAndBounds()
@@ -550,21 +573,23 @@ internal static class Program
     private static void ResolutionNon4KSafetyFloor()
     {
         ResolutionPlanner planner = new();
+        Assert.Equal(800, ResolutionPlanner.MinimumInteractiveWidth);
+        Assert.Equal(600, ResolutionPlanner.MinimumInteractiveHeight);
 
         ResolutionPlan hd = planner.CreatePlan(
             new PixelSize(1920, 1080),
             ResolutionPresetKind.Comfort);
-        Assert.Equal(new PixelSize(960, 540), hd.SourceResolution);
-        Assert.True(hd.UsesIntegerScale);
+        Assert.Equal(new PixelSize(1068, 600), hd.SourceResolution);
+        Assert.True(hd.ActualUiScale > 1.79 && hd.ActualUiScale <= 1.8);
 
         ResolutionPlan small = planner.CreatePlan(
             new PixelSize(1280, 720),
             ResolutionPresetKind.PixelCrisp);
         Assert.True(
-            small.SourceResolution.Width >= 640,
+            small.SourceResolution.Width >= 800,
             "The source width must not fall below the documented safe floor.");
         Assert.True(
-            small.SourceResolution.Height >= 480,
+            small.SourceResolution.Height >= 600,
             "The source height must not fall below the documented safe floor.");
 
         ResolutionPlan native = planner.CreateCustomPlan(
@@ -2870,6 +2895,22 @@ internal static class Program
         Assert.True(gentle.UsesWorkArea);
         Assert.False(gentle.FrameExtendsBeyondMonitor);
 
+        Assert.True(
+            WindowPlacementPlanner.CanPreserveCurrentClientArea(
+                new PixelRect(0, 31, 2752, 1152),
+                new PixelSize(2752, 1152),
+                ultrawide));
+        Assert.False(
+            WindowPlacementPlanner.CanPreserveCurrentClientArea(
+                new PixelRect(0, 31, 2750, 1152),
+                new PixelSize(2752, 1152),
+                ultrawide));
+        Assert.False(
+            WindowPlacementPlanner.CanPreserveCurrentClientArea(
+                new PixelRect(1000, 31, 2752, 1152),
+                new PixelSize(2752, 1152),
+                ultrawide));
+
         MonitorDescriptor leftMonitor = ultrawide with
         {
             Handle = new nint(43),
@@ -2970,6 +3011,94 @@ internal static class Program
                     Title = "Notes",
                     ExecutablePath = @"C:\Tools\Utility.exe",
                 }));
+
+        OverlayWindowSnapshot eqLegendsOverlay = CreateOverlaySnapshot(
+            new nint(111),
+            processId: 2011,
+            new PixelRect(120, 120, 600, 300),
+            executablePath:
+                @"C:\Users\Player\AppData\Local\Programs\everquest-companion\EQ Legends Companion.exe")
+            with
+            {
+                ClassName = "Chrome_WidgetWin_1",
+                Title = "Fight Overlay",
+                IsTopmost = false,
+                IsLayered = false,
+            };
+        Assert.True(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                eqLegendsOverlay));
+        Assert.True(
+            OverlayPlacementPlanner.IsRecognizedCompanion(eqLegendsOverlay));
+        Assert.True(
+            OverlayPlacementPlanner.IsEligible(
+                eqLegendsOverlay,
+                new PixelRect(0, 0, 1280, 720),
+                excluded,
+                allowTemporaryNonTopmost: true));
+        Assert.True(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                eqLegendsOverlay with
+                {
+                    ExecutablePath = @"C:\Tools\EVERQUEST-COMPANION.EXE",
+                }));
+        Assert.True(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                eqLegendsOverlay with
+                {
+                    ExecutablePath = @"C:\Tools\eq-tools.exe",
+                }));
+        Assert.False(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                eqLegendsOverlay with { Title = "Cursor Ring" }));
+        Assert.False(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                eqLegendsOverlay with { Title = "Companion Settings" }));
+        Assert.False(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                eqLegendsOverlay with { ExecutablePath = null }));
+        Assert.False(
+            OverlayPlacementPlanner.IsEligible(
+                eqLegendsOverlay with
+                {
+                    Bounds = new PixelRect(120, 0, 720, 820),
+                },
+                new PixelRect(0, 0, 1280, 720),
+                excluded,
+                allowTemporaryNonTopmost: true));
+
+        OverlayWindowSnapshot eqLegendsMain = eqLegendsOverlay with
+        {
+            Handle = new nint(112),
+            Bounds = new PixelRect(40, 40, 1280, 860),
+            Title = "EQ Legends Companion",
+            IsToolWindow = false,
+        };
+        Assert.False(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(eqLegendsMain));
+        Assert.False(
+            OverlayPlacementPlanner.IsRecognizedCompanion(eqLegendsMain));
+        Assert.False(
+            OverlayPlacementPlanner.IsEligible(
+                eqLegendsMain with { IsTopmost = true },
+                target,
+                excluded));
+        OverlayWindowSnapshot ordinaryTopmostTool = eqLegendsOverlay with
+        {
+            ExecutablePath = @"C:\Tools\Utility.exe",
+            IsTopmost = true,
+        };
+        Assert.False(
+            OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(
+                ordinaryTopmostTool));
+        Assert.False(
+            OverlayPlacementPlanner.IsRecognizedCompanion(
+                ordinaryTopmostTool));
+        Assert.True(
+            OverlayPlacementPlanner.IsEligible(
+                ordinaryTopmostTool,
+                new PixelRect(0, 0, 1280, 720),
+                excluded));
         Assert.False(
             OverlayPlacementPlanner.IsEligible(
                 loremaster with { ProcessId = 9001 },
@@ -3015,6 +3144,51 @@ internal static class Program
                 rightBottom));
     }
 
+    private static void Overlay125PercentSourceShadowMapping()
+    {
+        PixelRect target = new(0, 0, 3840, 2160);
+        PixelRect source = new(384, 216, 3072, 1728);
+        nint scalingWindow = new(9002);
+        nint sourceWindow = new(9001);
+
+        Assert.Equal(
+            new WindowPlacementPoint(0, 0),
+            OverlayPlacementPlanner.ResolveEffectivePointer(
+                new WindowPlacementPoint(source.X, source.Y),
+                source,
+                target,
+                scalingWindow,
+                sourceWindow));
+        Assert.Equal(
+            new WindowPlacementPoint(125, 125),
+            OverlayPlacementPlanner.ResolveEffectivePointer(
+                new WindowPlacementPoint(source.X + 100, source.Y + 100),
+                source,
+                target,
+                scalingWindow,
+                sourceWindow));
+        Assert.Equal(
+            new WindowPlacementPoint(3839, 2159),
+            OverlayPlacementPlanner.ResolveEffectivePointer(
+                new WindowPlacementPoint(
+                    source.X + source.Width - 1,
+                    source.Y + source.Height - 1),
+                source,
+                target,
+                scalingWindow,
+                sourceWindow));
+
+        WindowPlacementPoint scalingOwnedRaw = new(source.X + 100, source.Y + 100);
+        Assert.Equal(
+            scalingOwnedRaw,
+            OverlayPlacementPlanner.ResolveEffectivePointer(
+                scalingOwnedRaw,
+                source,
+                target,
+                scalingWindow,
+                scalingWindow));
+    }
+
     private static void OverlayCompatibilityLifecycle()
     {
         PixelRect target = new(0, 0, 3840, 2160);
@@ -3037,6 +3211,9 @@ internal static class Program
             ExecutablePath = @"C:\Tools\Utility.exe",
         };
         FakeOverlayWindowApi windowApi = new(first, second, ordinaryWindow);
+        windowApi.ForegroundWindowHandle = new nint(9001);
+        windowApi.CursorPosition = new WindowPlacementPoint(source.X, source.Y);
+        windowApi.WindowAtCursorHandle = new nint(9001);
         OverlayCompatibilityService service = new(windowApi);
         OverlayCompatibilitySession session = service.Capture(
             new OverlayCompatibilityCaptureRequest
@@ -3111,6 +3288,497 @@ internal static class Program
                 target));
     }
 
+    private static void EqLegendsCompanionOverlayLifecycle()
+    {
+        PixelRect target = new(0, 0, 3840, 2160);
+        PixelRect source = new(320, 180, 3200, 1800);
+        nint sourceWindow = new(9001);
+        nint scalingWindow = new(9002);
+        const int companionProcessId = 2401;
+        const string companionExecutable =
+            @"C:\Users\Player\AppData\Local\Programs\everquest-companion\EQ Legends Companion.exe";
+
+        OverlayWindowSnapshot fightOverlay = CreateOverlaySnapshot(
+            new nint(401),
+            companionProcessId,
+            new PixelRect(2900, 1600, 620, 420),
+            companionExecutable) with
+        {
+            ClassName = "Chrome_WidgetWin_1",
+            Title = "Fight Overlay",
+            IsTopmost = false,
+            IsLayered = false,
+        };
+        OverlayWindowSnapshot companionMainWindow = CreateOverlaySnapshot(
+            new nint(402),
+            companionProcessId,
+            new PixelRect(200, 100, 1280, 860),
+            companionExecutable) with
+        {
+            ClassName = "Chrome_WidgetWin_1",
+            Title = "EQ Legends Companion",
+            IsTopmost = false,
+            IsToolWindow = false,
+            IsLayered = false,
+        };
+        OverlayWindowSnapshot companionSettingsWindow = CreateOverlaySnapshot(
+            new nint(405),
+            companionProcessId,
+            new PixelRect(600, 300, 500, 320),
+            companionExecutable) with
+        {
+            ClassName = "Chrome_WidgetWin_1",
+            Title = "Companion Settings",
+            IsTopmost = false,
+            IsToolWindow = true,
+            IsLayered = false,
+        };
+        FakeOverlayWindowApi windowApi = new(
+            fightOverlay,
+            companionSettingsWindow,
+            companionMainWindow)
+        {
+            ForegroundWindowHandle = sourceWindow,
+            CursorPosition = new WindowPlacementPoint(source.X, source.Y),
+            WindowAtCursorHandle = sourceWindow,
+        };
+        OverlayCompatibilityService service = new(windowApi);
+        OverlayCompatibilitySession session = service.Capture(
+            new OverlayCompatibilityCaptureRequest
+            {
+                SourceWindowHandle = sourceWindow,
+                SourceProcessId = 9001,
+                SourceRegion = source,
+                TargetRegion = target,
+                ExcludedProcessIds = new HashSet<int> { 9001, 9002 },
+            });
+
+        Assert.Equal(1, session.CapturedWindowCount);
+        Assert.True(session.TracksWindow(fightOverlay.Handle));
+        Assert.False(session.TracksWindow(companionSettingsWindow.Handle));
+        Assert.False(session.TracksWindow(companionMainWindow.Handle));
+
+        _ = service.Activate(
+            session,
+            scalingWindow,
+            scalingProcessId: 9002,
+            target);
+        Assert.True(windowApi.Inspect(fightOverlay.Handle)!.IsTopmost);
+        Assert.Equal(1, session.MappedWindowCount);
+        Assert.Empty(windowApi.InputTransparencyRequests);
+
+        OverlayWindowSnapshot zoneOverlay = CreateOverlaySnapshot(
+            new nint(403),
+            companionProcessId,
+            new PixelRect(1700, 700, 520, 260),
+            companionExecutable) with
+        {
+            ClassName = "Chrome_WidgetWin_1",
+            Title = "Zone Overlay",
+            IsTopmost = false,
+            IsLayered = false,
+        };
+        windowApi.SetSnapshot(zoneOverlay);
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.Shown,
+                zoneOverlay.Handle));
+
+        Assert.Equal(2, session.CapturedWindowCount);
+        Assert.True(session.TracksWindow(zoneOverlay.Handle));
+        Assert.False(session.TracksWindow(companionMainWindow.Handle));
+        Assert.True(windowApi.Inspect(zoneOverlay.Handle)!.IsTopmost);
+        Assert.Equal(zoneOverlay.Bounds, windowApi.Inspect(zoneOverlay.Handle)!.Bounds);
+        Assert.Equal(1, session.MappedWindowCount);
+        Assert.Empty(windowApi.InputTransparencyRequests);
+
+        // Clicking an unlocked companion panel must make it interactive without
+        // dropping either tracked panel behind Magpie.
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                zoneOverlay.Handle));
+        Assert.True(windowApi.Inspect(fightOverlay.Handle)!.IsTopmost);
+        Assert.True(windowApi.Inspect(zoneOverlay.Handle)!.IsTopmost);
+        Assert.False(windowApi.Inspect(fightOverlay.Handle)!.IsInputTransparent);
+        Assert.False(windowApi.Inspect(zoneOverlay.Handle)!.IsInputTransparent);
+        Assert.Empty(windowApi.InputTransparencyRequests);
+        _ = service.Maintain(
+            session,
+            sourceOrScalingOutputIsForeground: false,
+            discoverNewWindows: false);
+        Assert.True(windowApi.Inspect(fightOverlay.Handle)!.IsTopmost);
+        Assert.True(windowApi.Inspect(zoneOverlay.Handle)!.IsTopmost);
+
+        // The full Companion dashboard shares the PID but is not an overlay. It
+        // must remain untracked and should put protected overlays in the normal
+        // background state while the user configures the app.
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                companionMainWindow.Handle));
+        Assert.False(session.TracksWindow(companionMainWindow.Handle));
+        Assert.False(windowApi.Inspect(fightOverlay.Handle)!.IsTopmost);
+        Assert.False(windowApi.Inspect(zoneOverlay.Handle)!.IsTopmost);
+
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                scalingWindow));
+        Assert.True(windowApi.Inspect(fightOverlay.Handle)!.IsTopmost);
+        Assert.True(windowApi.Inspect(zoneOverlay.Handle)!.IsTopmost);
+
+        OverlayCompatibilityUpdate restored = service.Restore(session);
+        Assert.Empty(restored.Warnings);
+        Assert.False(windowApi.Inspect(fightOverlay.Handle)!.IsTopmost);
+        Assert.False(windowApi.Inspect(zoneOverlay.Handle)!.IsTopmost);
+        Assert.Equal(fightOverlay.Bounds, windowApi.Inspect(fightOverlay.Handle)!.Bounds);
+        Assert.Equal(zoneOverlay.Bounds, windowApi.Inspect(zoneOverlay.Handle)!.Bounds);
+
+        OverlayWindowSnapshot companionHiddenOverlay = zoneOverlay with
+        {
+            Handle = new nint(404),
+            IsVisible = true,
+            IsTopmost = false,
+        };
+        FakeOverlayWindowApi hiddenWindowApi = new(companionHiddenOverlay)
+        {
+            ForegroundWindowHandle = sourceWindow,
+            CursorPosition = new WindowPlacementPoint(source.X, source.Y),
+            WindowAtCursorHandle = sourceWindow,
+        };
+        OverlayCompatibilityService hiddenService = new(hiddenWindowApi);
+        OverlayCompatibilitySession hiddenSession = hiddenService.Capture(
+            new OverlayCompatibilityCaptureRequest
+            {
+                SourceWindowHandle = sourceWindow,
+                SourceProcessId = 9001,
+                SourceRegion = source,
+                TargetRegion = target,
+                ExcludedProcessIds = new HashSet<int> { 9001, 9002 },
+            });
+        Assert.Equal(1, hiddenSession.CapturedWindowCount);
+        Assert.Empty(hiddenSession.Warnings);
+
+        _ = hiddenService.Activate(
+            hiddenSession,
+            scalingWindow,
+            scalingProcessId: 9002,
+            target);
+        hiddenWindowApi.SetSnapshot(
+            hiddenWindowApi.Inspect(companionHiddenOverlay.Handle)! with
+            {
+                IsVisible = false,
+                IsTopmost = false,
+            });
+        _ = hiddenService.Maintain(
+            hiddenSession,
+            sourceOrScalingOutputIsForeground: true,
+            discoverNewWindows: true);
+        Assert.False(
+            hiddenWindowApi.Inspect(companionHiddenOverlay.Handle)!.IsVisible);
+        Assert.Equal(1, hiddenSession.Warnings.Count);
+        Assert.True(
+            hiddenSession.Warnings[0].Contains(
+                "Hide when unfocused",
+                StringComparison.Ordinal));
+
+        hiddenWindowApi.SetSnapshot(
+            hiddenWindowApi.Inspect(companionHiddenOverlay.Handle)! with
+            {
+                IsVisible = true,
+            });
+        hiddenWindowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.Shown,
+                companionHiddenOverlay.Handle));
+        Assert.True(hiddenSession.TracksWindow(companionHiddenOverlay.Handle));
+        Assert.True(
+            hiddenWindowApi.Inspect(companionHiddenOverlay.Handle)!.IsTopmost);
+        _ = hiddenService.Restore(hiddenSession);
+
+        OverlayWindowSnapshot originalHandleOwner = fightOverlay with
+        {
+            Handle = new nint(406),
+            ProcessId = 2402,
+            IsTopmost = false,
+        };
+        FakeOverlayWindowApi reuseWindowApi = new(originalHandleOwner)
+        {
+            ForegroundWindowHandle = sourceWindow,
+            CursorPosition = new WindowPlacementPoint(source.X, source.Y),
+            WindowAtCursorHandle = sourceWindow,
+        };
+        OverlayCompatibilityService reuseService = new(reuseWindowApi);
+        OverlayCompatibilitySession reuseSession = reuseService.Capture(
+            new OverlayCompatibilityCaptureRequest
+            {
+                SourceWindowHandle = sourceWindow,
+                SourceProcessId = 9001,
+                SourceRegion = source,
+                TargetRegion = target,
+                ExcludedProcessIds = new HashSet<int> { 9001, 9002 },
+            });
+        _ = reuseService.Activate(
+            reuseSession,
+            scalingWindow,
+            scalingProcessId: 9002,
+            target);
+        int requestsBeforeHandleReuse = reuseWindowApi.TopmostRequests.Count;
+        reuseWindowApi.SetSnapshot(
+            originalHandleOwner with
+            {
+                ProcessId = 7777,
+                Title = "Unrelated utility",
+                ExecutablePath = @"C:\Tools\Utility.exe",
+                IsTopmost = false,
+                IsToolWindow = false,
+            });
+        reuseWindowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.Shown,
+                originalHandleOwner.Handle));
+        Assert.False(reuseSession.TracksWindow(originalHandleOwner.Handle));
+        Assert.Equal(
+            requestsBeforeHandleReuse,
+            reuseWindowApi.TopmostRequests.Count);
+
+        OverlayWindowSnapshot replacementOverlay = zoneOverlay with
+        {
+            Handle = originalHandleOwner.Handle,
+            ProcessId = 2403,
+            IsTopmost = false,
+        };
+        reuseWindowApi.SetSnapshot(replacementOverlay);
+        reuseWindowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.Shown,
+                replacementOverlay.Handle));
+        Assert.True(reuseSession.TracksWindow(replacementOverlay.Handle));
+        Assert.True(reuseWindowApi.Inspect(replacementOverlay.Handle)!.IsTopmost);
+        _ = reuseService.Restore(reuseSession);
+    }
+
+    private static void OverlayCompatibilityInputPassThrough()
+    {
+        PixelRect target = new(0, 0, 3840, 2160);
+        PixelRect source = new(320, 180, 3200, 1800);
+        nint sourceWindow = new(9001);
+        nint scalingWindow = new(9002);
+        OverlayWindowSnapshot opaqueOverlap = CreateOverlaySnapshot(
+            new nint(301),
+            processId: 2301,
+            new PixelRect(1500, 800, 320, 40));
+        OverlayWindowSnapshot transparentOverlap = CreateOverlaySnapshot(
+            new nint(302),
+            processId: 2302,
+            new PixelRect(2200, 900, 300, 100)) with
+        {
+            IsInputTransparent = true,
+        };
+        OverlayWindowSnapshot opaqueOutsideSource = CreateOverlaySnapshot(
+            new nint(303),
+            processId: 2303,
+            new PixelRect(0, 0, 100, 100));
+        FakeOverlayWindowApi windowApi = new(
+            opaqueOverlap,
+            transparentOverlap,
+            opaqueOutsideSource)
+        {
+            ForegroundWindowHandle = sourceWindow,
+            CursorPosition = new WindowPlacementPoint(source.X, source.Y),
+            WindowAtCursorHandle = sourceWindow,
+        };
+        OverlayCompatibilityService service = new(windowApi);
+        OverlayCompatibilitySession session = service.Capture(
+            new OverlayCompatibilityCaptureRequest
+            {
+                SourceWindowHandle = sourceWindow,
+                SourceProcessId = 9001,
+                SourceRegion = source,
+                TargetRegion = target,
+                ExcludedProcessIds = new HashSet<int> { 9001, 9002 },
+            });
+
+        _ = service.Activate(
+            session,
+            scalingWindow,
+            scalingProcessId: 9002,
+            target);
+        Assert.True(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+        Assert.True(windowApi.Inspect(transparentOverlap.Handle)!.IsInputTransparent);
+        Assert.False(
+            windowApi.Inspect(opaqueOutsideSource.Handle)!.IsInputTransparent);
+        Assert.SequenceEqual(
+            new[] { (opaqueOverlap.Handle, true) },
+            windowApi.InputTransparencyRequests);
+
+        // Magpie keeps the raw pointer in source coordinates while drawing it at
+        // the scaled destination. Hovering the visible overlay must restore its
+        // original opaque input style so its controls remain clickable.
+        windowApi.CursorPosition = new WindowPlacementPoint(
+            opaqueOverlap.Bounds.X + opaqueOverlap.Bounds.Width / 2,
+            opaqueOverlap.Bounds.Y + opaqueOverlap.Bounds.Height / 2);
+        windowApi.WindowAtCursorHandle = scalingWindow;
+        _ = service.RefreshInputHandoff(session);
+        Assert.True(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+
+        windowApi.WindowAtCursorHandle = sourceWindow;
+        _ = service.RefreshInputHandoff(session);
+        Assert.False(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+
+        windowApi.CursorPosition = new WindowPlacementPoint(source.X, source.Y);
+        _ = service.RefreshInputHandoff(session);
+        Assert.True(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+
+        // Bringing the tracked overlay forward is an explicit interaction mode.
+        // It must become clickable immediately, and the periodic maintenance call
+        // must not reinterpret that overlay as gameplay foreground.
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                opaqueOverlap.Handle));
+        Assert.False(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+        int requestsInInteractionMode = windowApi.InputTransparencyRequests.Count;
+        _ = service.Maintain(
+            session,
+            sourceOrScalingOutputIsForeground: true,
+            discoverNewWindows: false);
+        Assert.Equal(
+            requestsInInteractionMode,
+            windowApi.InputTransparencyRequests.Count);
+
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                scalingWindow));
+        Assert.True(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+
+        // The style is needed only while the native overlay physically shadows the
+        // source. Moving it outside that source restores normal input immediately.
+        windowApi.SetSnapshot(
+            windowApi.Inspect(opaqueOverlap.Handle)! with
+            {
+                Bounds = new PixelRect(0, 0, 100, 100),
+            });
+        _ = service.Maintain(
+            session,
+            sourceOrScalingOutputIsForeground: true,
+            discoverNewWindows: false);
+        Assert.False(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+
+        windowApi.SetSnapshot(
+            windowApi.Inspect(opaqueOverlap.Handle)! with
+            {
+                Bounds = new PixelRect(1000, 500, 320, 120),
+            });
+        _ = service.Maintain(
+            session,
+            sourceOrScalingOutputIsForeground: true,
+            discoverNewWindows: false);
+        Assert.True(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+
+        _ = service.Restore(session);
+        Assert.False(windowApi.Inspect(opaqueOverlap.Handle)!.IsInputTransparent);
+        Assert.True(windowApi.Inspect(transparentOverlap.Handle)!.IsInputTransparent);
+        Assert.False(
+            windowApi.Inspect(opaqueOutsideSource.Handle)!.IsInputTransparent);
+        Assert.SequenceEqual(
+            new[]
+            {
+                (opaqueOverlap.Handle, true),
+                (opaqueOverlap.Handle, false),
+                (opaqueOverlap.Handle, true),
+                (opaqueOverlap.Handle, false),
+                (opaqueOverlap.Handle, true),
+                (opaqueOverlap.Handle, false),
+                (opaqueOverlap.Handle, true),
+                (opaqueOverlap.Handle, false),
+            },
+            windowApi.InputTransparencyRequests);
+
+        OverlayWindowSnapshot restoreFailureOverlay = CreateOverlaySnapshot(
+            new nint(304),
+            processId: 2304,
+            new PixelRect(1200, 700, 260, 90));
+        FakeOverlayWindowApi restoreFailureApi = new(restoreFailureOverlay)
+        {
+            ForegroundWindowHandle = sourceWindow,
+            CursorPosition = new WindowPlacementPoint(source.X, source.Y),
+            WindowAtCursorHandle = sourceWindow,
+        };
+        OverlayCompatibilityService restoreFailureService = new(restoreFailureApi);
+        OverlayCompatibilitySession restoreFailureSession =
+            restoreFailureService.Capture(
+                new OverlayCompatibilityCaptureRequest
+                {
+                    SourceWindowHandle = sourceWindow,
+                    SourceProcessId = 9001,
+                    SourceRegion = source,
+                    TargetRegion = target,
+                    ExcludedProcessIds = new HashSet<int> { 9001, 9002 },
+                });
+        _ = restoreFailureService.Activate(
+            restoreFailureSession,
+            scalingWindow,
+            scalingProcessId: 9002,
+            target);
+        restoreFailureApi.RejectInputTransparencyChanges = true;
+        restoreFailureApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                new nint(9999)));
+        Assert.True(
+            restoreFailureApi.Inspect(restoreFailureOverlay.Handle)!
+                .IsInputTransparent);
+        Assert.True(
+            restoreFailureSession.Warnings.Any(
+                warning => warning.Contains(
+                    "original mouse-input behavior",
+                    StringComparison.Ordinal)));
+        restoreFailureApi.RejectInputTransparencyChanges = false;
+        _ = restoreFailureService.Restore(restoreFailureSession);
+        Assert.False(
+            restoreFailureApi.Inspect(restoreFailureOverlay.Handle)!
+                .IsInputTransparent);
+
+        OverlayWindowSnapshot applyFailureOverlay = CreateOverlaySnapshot(
+            new nint(305),
+            processId: 2305,
+            new PixelRect(1200, 700, 260, 90));
+        FakeOverlayWindowApi applyFailureApi = new(applyFailureOverlay)
+        {
+            ForegroundWindowHandle = sourceWindow,
+            CursorPosition = new WindowPlacementPoint(source.X, source.Y),
+            WindowAtCursorHandle = sourceWindow,
+            RejectInputTransparencyChanges = true,
+        };
+        OverlayCompatibilityService applyFailureService = new(applyFailureApi);
+        OverlayCompatibilitySession applyFailureSession = applyFailureService.Capture(
+            new OverlayCompatibilityCaptureRequest
+            {
+                SourceWindowHandle = sourceWindow,
+                SourceProcessId = 9001,
+                SourceRegion = source,
+                TargetRegion = target,
+                ExcludedProcessIds = new HashSet<int> { 9001, 9002 },
+            });
+        _ = applyFailureService.Activate(
+            applyFailureSession,
+            scalingWindow,
+            scalingProcessId: 9002,
+            target);
+        Assert.False(
+            applyFailureApi.Inspect(applyFailureOverlay.Handle)!
+                .IsInputTransparent);
+        Assert.True(
+            applyFailureSession.Warnings.Any(
+                warning => warning.Contains(
+                    "temporarily click-through",
+                    StringComparison.Ordinal)));
+        _ = applyFailureService.Restore(applyFailureSession);
+    }
+
     private static void OverlayCompatibilityEventRecovery()
     {
         PixelRect target = new(0, 0, 3840, 2160);
@@ -3120,7 +3788,7 @@ internal static class Program
         OverlayWindowSnapshot loremaster = CreateOverlaySnapshot(
             new nint(201),
             processId: 2101,
-            new PixelRect(3200, 1880, 300, 100),
+            new PixelRect(3000, 1700, 300, 100),
             executablePath: @"C:\Users\Player\SpinsLoremaster\Loremaster.exe")
             with
             {
@@ -3145,6 +3813,9 @@ internal static class Program
             loremaster,
             ordinaryWindow,
             alternateScalingWindow);
+        windowApi.ForegroundWindowHandle = sourceWindow;
+        windowApi.CursorPosition = new WindowPlacementPoint(source.X, source.Y);
+        windowApi.WindowAtCursorHandle = sourceWindow;
         OverlayCompatibilityService service = new(windowApi);
         OverlayCompatibilitySession session = service.Capture(
             new OverlayCompatibilityCaptureRequest
@@ -3163,6 +3834,7 @@ internal static class Program
             scalingProcessId: 9002,
             target);
         Assert.True(windowApi.Inspect(loremaster.Handle)!.IsTopmost);
+        Assert.True(windowApi.Inspect(loremaster.Handle)!.IsInputTransparent);
         Assert.Equal(1, windowApi.TopmostRequests.Count);
 
         windowApi.SetSnapshot(
@@ -3185,11 +3857,18 @@ internal static class Program
                 OverlayWindowEventKind.ForegroundChanged,
                 new nint(9999)));
         Assert.False(windowApi.Inspect(loremaster.Handle)!.IsTopmost);
+        Assert.False(windowApi.Inspect(loremaster.Handle)!.IsInputTransparent);
         windowApi.RaiseWindowEvent(
             new OverlayWindowEvent(
                 OverlayWindowEventKind.ForegroundChanged,
                 alternateScalingWindow.Handle));
+        Assert.False(windowApi.Inspect(loremaster.Handle)!.IsTopmost);
+        windowApi.RaiseWindowEvent(
+            new OverlayWindowEvent(
+                OverlayWindowEventKind.ForegroundChanged,
+                scalingWindow));
         Assert.True(windowApi.Inspect(loremaster.Handle)!.IsTopmost);
+        Assert.True(windowApi.Inspect(loremaster.Handle)!.IsInputTransparent);
 
         int requestCountBeforeRestore = windowApi.TopmostRequests.Count;
         _ = service.Restore(session);
@@ -3258,6 +3937,66 @@ internal static class Program
             () => service.WaitForVisibleWindowAsync(
                 unstarted,
                 TimeSpan.FromMilliseconds(20))).ConfigureAwait(false);
+    }
+
+    private static async Task ManagedLaunchInteractionReadinessPolicyAsync()
+    {
+        Assert.Equal(
+            TimeSpan.FromMilliseconds(100),
+            WindowInteractionReadinessPolicy.DiscoveryPollInterval);
+        Assert.Equal(
+            TimeSpan.FromSeconds(1),
+            WindowInteractionReadinessPolicy.ManagedLaunchStableDuration);
+        Assert.Equal(
+            11,
+            WindowInteractionReadinessPolicy.ManagedLaunchRequiredStablePolls);
+        Assert.Equal(
+            4,
+            WindowInteractionReadinessPolicy.CalculateRequiredStablePolls(
+                TimeSpan.FromMilliseconds(250),
+                TimeSpan.FromMilliseconds(100)));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => WindowInteractionReadinessPolicy.CalculateRequiredStablePolls(
+                TimeSpan.Zero,
+                TimeSpan.FromMilliseconds(100)));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => WindowInteractionReadinessPolicy.CalculateRequiredStablePolls(
+                TimeSpan.FromSeconds(1),
+                TimeSpan.Zero));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => WindowInteractionReadinessPolicy.CalculateRequiredStablePolls(
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromMilliseconds(100)));
+
+        PixelSize expectedSize = new(2752, 1152);
+        WindowDescriptor expected = new(
+            new nint(123),
+            Environment.ProcessId,
+            "EverQuest",
+            "EQGameWindow",
+            new PixelRect(0, 0, 2768, 1191),
+            new PixelRect(8, 31, expectedSize.Width, expectedSize.Height),
+            IsMinimized: false,
+            ExecutablePath: @"C:\EQLegends\eqgame.exe");
+        FakeWindowDiscoveryService windows = new()
+        {
+            AllowCalls = true,
+            StableResult = expected,
+        };
+        using Process process = Process.GetCurrentProcess();
+
+        WindowDescriptor actual =
+            await WindowInteractionReadinessPolicy.WaitForManagedLaunchAsync(
+                windows,
+                process,
+                expectedSize,
+                TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+
+        Assert.Equal(expected, actual);
+        Assert.Equal(1, windows.StableCalls);
+        Assert.Equal(
+            WindowInteractionReadinessPolicy.ManagedLaunchRequiredStablePolls,
+            windows.StablePollRequirements.Single());
     }
 
     private static async Task JournalLifecycleAsync()
@@ -5812,6 +6551,11 @@ internal static class Program
             processId: ownedProcessId + 100,
             originalOverlayBounds);
         FakeOverlayWindowApi overlayWindows = new(overlay);
+        overlayWindows.ForegroundWindowHandle = sourceWindow.Handle;
+        overlayWindows.CursorPosition = new WindowPlacementPoint(
+            sourceWindow.ClientBounds.X,
+            sourceWindow.ClientBounds.Y);
+        overlayWindows.WindowAtCursorHandle = sourceWindow.Handle;
         OverlayCompatibilityService overlayCompatibility = new(overlayWindows);
         LaunchAcceptanceHarness harness =
             CreateLaunchAcceptanceHarness(
@@ -8498,6 +9242,19 @@ internal sealed class FakeOverlayWindowApi : IOverlayWindowApi
 
     public List<(nint Handle, PixelRect Bounds)> MoveRequests { get; } = [];
 
+    public List<(nint Handle, bool InputTransparent)> InputTransparencyRequests
+    {
+        get;
+    } = [];
+
+    public nint ForegroundWindowHandle { get; set; }
+
+    public WindowPlacementPoint? CursorPosition { get; set; }
+
+    public nint WindowAtCursorHandle { get; set; }
+
+    public bool RejectInputTransparencyChanges { get; set; }
+
     public bool ObserverDisposed { get; private set; }
 
     public IReadOnlyList<OverlayWindowSnapshot> EnumerateTopLevelWindows() =>
@@ -8507,6 +9264,26 @@ internal sealed class FakeOverlayWindowApi : IOverlayWindowApi
         _windows.TryGetValue(windowHandle, out OverlayWindowSnapshot? snapshot)
             ? snapshot
             : null;
+
+    public nint GetForegroundWindowHandle() => ForegroundWindowHandle;
+
+    public bool TryGetCursorPosition(out WindowPlacementPoint position)
+    {
+        if (CursorPosition is { } current)
+        {
+            position = current;
+            return true;
+        }
+
+        position = default;
+        return false;
+    }
+
+    public nint WindowFromPoint(WindowPlacementPoint position)
+    {
+        _ = position;
+        return WindowAtCursorHandle;
+    }
 
     public bool SetTopmostWithoutActivation(nint windowHandle, bool topmost)
     {
@@ -8519,6 +9296,30 @@ internal sealed class FakeOverlayWindowApi : IOverlayWindowApi
 
         TopmostRequests.Add((windowHandle, topmost));
         _windows[windowHandle] = snapshot with { IsTopmost = topmost };
+        return true;
+    }
+
+    public bool SetInputTransparentWithoutActivation(
+        nint windowHandle,
+        bool inputTransparent)
+    {
+        if (!_windows.TryGetValue(
+                windowHandle,
+                out OverlayWindowSnapshot? snapshot))
+        {
+            return false;
+        }
+
+        InputTransparencyRequests.Add((windowHandle, inputTransparent));
+        if (RejectInputTransparencyChanges)
+        {
+            return false;
+        }
+
+        _windows[windowHandle] = snapshot with
+        {
+            IsInputTransparent = inputTransparent,
+        };
         return true;
     }
 
@@ -8550,6 +9351,11 @@ internal sealed class FakeOverlayWindowApi : IOverlayWindowApi
 
     public void RaiseWindowEvent(OverlayWindowEvent windowEvent)
     {
+        if (windowEvent.Kind == OverlayWindowEventKind.ForegroundChanged)
+        {
+            ForegroundWindowHandle = windowEvent.WindowHandle;
+        }
+
         _windowEventCallback?.Invoke(windowEvent);
     }
 
@@ -8710,6 +9516,8 @@ internal sealed class FakeWindowDiscoveryService : IWindowDiscoveryService
 
     public int StableCalls { get; private set; }
 
+    public List<int> StablePollRequirements { get; } = [];
+
     public Queue<IReadOnlyList<WindowDescriptor>> VisibleWindowResults { get; } =
         new();
 
@@ -8773,6 +9581,7 @@ internal sealed class FakeWindowDiscoveryService : IWindowDiscoveryService
         {
             InvocationCount++;
             StableCalls++;
+            StablePollRequirements.Add(requiredStablePolls);
             LastProcess = process;
             if (StableExceptions.Count > 0)
             {
@@ -8811,6 +9620,7 @@ internal sealed class FakeWindowDiscoveryService : IWindowDiscoveryService
         {
             InvocationCount++;
             StableCalls++;
+            StablePollRequirements.Add(requiredStablePolls);
             LastProcess = process;
             if (StableExceptions.Count > 0)
             {
