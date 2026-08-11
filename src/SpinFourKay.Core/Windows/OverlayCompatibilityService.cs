@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SpinFourKay.Core.Display;
+using SpinFourKay.Core.Magpie;
 
 namespace SpinFourKay.Core.Windows;
 
@@ -41,6 +42,7 @@ public sealed record OverlayCompatibilityUpdate(
 public enum OverlayWindowEventKind
 {
     ForegroundChanged,
+    Shown,
     ZOrderChanged,
 }
 
@@ -54,7 +56,17 @@ public interface IOverlayWindowApi
 
     OverlayWindowSnapshot? Inspect(nint windowHandle);
 
+    nint GetForegroundWindowHandle();
+
+    bool TryGetCursorPosition(out WindowPlacementPoint position);
+
+    nint WindowFromPoint(WindowPlacementPoint position);
+
     bool SetTopmostWithoutActivation(nint windowHandle, bool topmost);
+
+    bool SetInputTransparentWithoutActivation(
+        nint windowHandle,
+        bool inputTransparent);
 
     bool MoveWithoutResizing(nint windowHandle, PixelRect bounds);
 
@@ -75,6 +87,9 @@ public interface IOverlayCompatibilityService
         OverlayCompatibilitySession session,
         bool sourceOrScalingOutputIsForeground,
         bool discoverNewWindows = true);
+
+    OverlayCompatibilityUpdate RefreshInputHandoff(
+        OverlayCompatibilitySession session);
 
     OverlayCompatibilityUpdate Restore(OverlayCompatibilitySession session);
 }
@@ -197,13 +212,15 @@ internal sealed class OverlayWindowState
 
     internal bool IsPromotedByService { get; set; }
 
+    internal bool IsInputTransparentByService { get; set; }
+
     internal long LastPromotionTimestamp { get; set; }
 }
 
 /// <summary>
 /// Keeps genuine always-on-top companion windows above Magpie's focused
 /// fullscreen output. Overlay pixels are never captured or resampled: only
-/// native window position and z-order are adjusted.
+/// native position, z-order, and a reversible pointer handoff are adjusted.
 /// </summary>
 public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
 {
@@ -296,7 +313,9 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
         session.DestinationRegion = destinationRegion;
         session.ExcludedProcessIds.Add(scalingProcessId);
         session.IsActive = true;
-        session.GameSessionIsForeground = true;
+        session.GameSessionIsForeground = IsExactGameSessionForeground(
+            session,
+            _windowApi.GetForegroundWindowHandle());
 
         foreach (OverlayWindowState window in session.Windows)
         {
@@ -332,7 +351,15 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
                 }
             }
 
-            Promote(session, window);
+            if (session.GameSessionIsForeground)
+            {
+                Promote(session, window);
+            }
+            else
+            {
+                RestoreInputTransparency(session, window);
+                Demote(session, window);
+            }
         }
 
         try
@@ -352,7 +379,7 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
                     + exception.Message);
         }
 
-        return CreateUpdate(session);
+        return RefreshInputHandoffLocked(session);
     }
 
     public OverlayCompatibilityUpdate Maintain(
@@ -376,15 +403,46 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
         bool discoverNewWindows = true)
     {
         ArgumentNullException.ThrowIfNull(session);
-        session.GameSessionIsForeground = sourceOrScalingOutputIsForeground;
-        if (!session.IsActive || !sourceOrScalingOutputIsForeground)
+        nint foregroundWindowHandle = _windowApi.GetForegroundWindowHandle();
+        bool exactGameSessionIsForeground = sourceOrScalingOutputIsForeground
+            && IsExactGameSessionForeground(
+                session,
+                foregroundWindowHandle);
+        bool trackedOverlayIsForeground = IsTrackedOverlayWindow(
+            session,
+            foregroundWindowHandle);
+        session.GameSessionIsForeground = exactGameSessionIsForeground;
+        if (!session.IsActive)
         {
-            if (session.IsActive)
+            return CreateUpdate(session);
+        }
+
+        if (trackedOverlayIsForeground)
+        {
+            // Interactive companion overlays can take focus. Keep the protected
+            // z-order while restoring their normal mouse input; otherwise an
+            // unlocked Electron overlay falls behind Magpie as soon as it is
+            // clicked.
+            foreach (OverlayWindowState window in session.Windows)
             {
-                foreach (OverlayWindowState window in session.Windows)
+                RestoreInputTransparency(session, window);
+                OverlayWindowSnapshot? current = _windowApi.Inspect(
+                    window.Identity.Handle);
+                if (SameWindow(window.Identity, current) && !current!.IsTopmost)
                 {
-                    Demote(session, window);
+                    Promote(session, window);
                 }
+            }
+
+            return CreateUpdate(session);
+        }
+
+        if (!exactGameSessionIsForeground)
+        {
+            foreach (OverlayWindowState window in session.Windows)
+            {
+                RestoreInputTransparency(session, window);
+                Demote(session, window);
             }
 
             return CreateUpdate(session);
@@ -438,6 +496,72 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
             Promote(session, window);
         }
 
+        return RefreshInputHandoffLocked(session);
+    }
+
+    public OverlayCompatibilityUpdate RefreshInputHandoff(
+        OverlayCompatibilitySession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        lock (session.SyncRoot)
+        {
+            return RefreshInputHandoffLocked(session);
+        }
+    }
+
+    private OverlayCompatibilityUpdate RefreshInputHandoffLocked(
+        OverlayCompatibilitySession session)
+    {
+        if (!session.IsActive)
+        {
+            return CreateUpdate(session);
+        }
+
+        bool exactGameSessionIsForeground = IsExactGameSessionForeground(
+            session,
+            _windowApi.GetForegroundWindowHandle());
+        session.GameSessionIsForeground = exactGameSessionIsForeground;
+        if (!exactGameSessionIsForeground)
+        {
+            foreach (OverlayWindowState window in session.Windows)
+            {
+                RestoreInputTransparency(session, window);
+            }
+
+            return CreateUpdate(session);
+        }
+
+        if (!_windowApi.TryGetCursorPosition(out WindowPlacementPoint rawPointer))
+        {
+            foreach (OverlayWindowState window in session.Windows)
+            {
+                RestoreInputTransparency(session, window);
+            }
+
+            session.AddWarning(
+                "cursor-position",
+                "Windows did not expose the current pointer position, so companion "
+                    + "overlays were left clickable for safety.");
+            return CreateUpdate(session);
+        }
+
+        nint windowAtRawPointer = OverlayPlacementPlanner.Contains(
+            session.Request.SourceRegion,
+            rawPointer)
+            ? _windowApi.WindowFromPoint(rawPointer)
+            : nint.Zero;
+        WindowPlacementPoint effectivePointer =
+            OverlayPlacementPlanner.ResolveEffectivePointer(
+                rawPointer,
+                session.Request.SourceRegion,
+                session.DestinationRegion,
+                session.ScalingWindowHandle,
+                windowAtRawPointer);
+        foreach (OverlayWindowState window in session.Windows)
+        {
+            UpdateInputHandoff(session, window, effectivePointer);
+        }
+
         return CreateUpdate(session);
     }
 
@@ -467,6 +591,10 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
     private OverlayCompatibilityUpdate RestoreLocked(
         OverlayCompatibilitySession session)
     {
+        foreach (OverlayWindowState window in session.Windows)
+        {
+            RestoreInputTransparency(session, window);
+        }
 
         foreach (OverlayWindowState window in session.Windows)
         {
@@ -514,16 +642,38 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
         return CreateUpdate(session);
     }
 
-    private static void TryCaptureWindow(
+    private static bool TryCaptureWindow(
         OverlayCompatibilitySession session,
         OverlayWindowSnapshot snapshot,
         bool allowPositionMapping)
     {
-        bool trustedCompanionProcess = session.Windows.Any(
-            window => window.Identity.ProcessId == snapshot.ProcessId);
-        bool allowTemporaryNonTopmost = trustedCompanionProcess
-            || OverlayPlacementPlanner.IsRecognizedCompanion(snapshot);
-        if (session.Windows.Any(window => window.Identity.Handle == snapshot.Handle)
+        OverlayWindowState? existing = session.Windows.FirstOrDefault(
+            window => window.Identity.Handle == snapshot.Handle);
+        bool alreadyTracked = existing is not null
+            && SameWindow(existing.Identity, snapshot);
+        if (existing is not null && !alreadyTracked)
+        {
+            // HWND values are recyclable. Forget stale identity without touching
+            // the replacement window, then evaluate the new snapshot normally.
+            session.Windows.Remove(existing);
+        }
+
+        if (alreadyTracked
+            && OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(snapshot)
+            && (!snapshot.IsVisible || snapshot.IsMinimized))
+        {
+            session.AddWarning(
+                "eq-legends-companion-hidden",
+                "EQ Legends Companion has hidden or minimized one of its "
+                    + "overlays. SpinFOURKAYYY will not force-open another "
+                    + "app's hidden window. If that overlay should be visible, "
+                    + "restore it and turn off EQ Legends Companion's 'Hide "
+                    + "when unfocused' option.");
+        }
+
+        bool allowTemporaryNonTopmost =
+            OverlayPlacementPlanner.IsRecognizedCompanion(snapshot);
+        if (alreadyTracked
             || !OverlayPlacementPlanner.IsEligible(
                 snapshot,
                 session.Request.TargetRegion,
@@ -531,16 +681,25 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
                 session.ScalingWindowHandle,
                 allowTemporaryNonTopmost))
         {
-            return;
+            return false;
         }
 
         session.Windows.Add(new OverlayWindowState(snapshot, allowPositionMapping));
+        return true;
     }
 
     private void Promote(
         OverlayCompatibilitySession session,
         OverlayWindowState window)
     {
+        OverlayWindowSnapshot? current = _windowApi.Inspect(window.Identity.Handle);
+        if (!SameWindow(window.Identity, current))
+        {
+            window.IsPromotedByService = false;
+            window.IsInputTransparentByService = false;
+            return;
+        }
+
         if (!_windowApi.SetTopmostWithoutActivation(
             window.Identity.Handle,
             topmost: true))
@@ -572,11 +731,54 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
                 return;
             }
 
+            OverlayWindowState? changedWindow = session.Windows.FirstOrDefault(
+                window => window.Identity.Handle == windowEvent.WindowHandle);
+            try
+            {
+                if (changedWindow is not null
+                    && !SameWindow(
+                        changedWindow.Identity,
+                        _windowApi.Inspect(windowEvent.WindowHandle)))
+                {
+                    session.Windows.Remove(changedWindow);
+                    changedWindow = null;
+                }
+
+                if (changedWindow is null)
+                {
+                    OverlayWindowSnapshot? snapshot =
+                        _windowApi.Inspect(windowEvent.WindowHandle);
+                    if (snapshot is not null
+                        && TryCaptureWindow(
+                            session,
+                            snapshot,
+                            allowPositionMapping: false))
+                    {
+                        changedWindow = session.Windows.First(
+                            window =>
+                                window.Identity.Handle == windowEvent.WindowHandle);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                session.AddWarning(
+                    "event-capture",
+                    "A newly opened companion overlay could not be inspected "
+                        + "immediately. The regular compatibility check will "
+                        + "try again. "
+                        + exception.Message);
+            }
+
             if (windowEvent.Kind == OverlayWindowEventKind.ForegroundChanged)
             {
-                bool gameSessionIsForeground = IsGameSessionForeground(
+                bool gameSessionIsForeground = IsExactGameSessionForeground(
                     session,
                     windowEvent.WindowHandle);
+                bool trackedOverlayIsForeground = changedWindow is not null
+                    && SameWindow(
+                        changedWindow.Identity,
+                        _windowApi.Inspect(changedWindow.Identity.Handle));
                 session.GameSessionIsForeground = gameSessionIsForeground;
                 foreach (OverlayWindowState window in session.Windows)
                 {
@@ -584,10 +786,27 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
                     {
                         Promote(session, window);
                     }
+                    else if (trackedOverlayIsForeground)
+                    {
+                        RestoreInputTransparency(session, window);
+                        OverlayWindowSnapshot? overlayCurrent = _windowApi.Inspect(
+                            window.Identity.Handle);
+                        if (SameWindow(window.Identity, overlayCurrent)
+                            && !overlayCurrent!.IsTopmost)
+                        {
+                            Promote(session, window);
+                        }
+                    }
                     else
                     {
+                        RestoreInputTransparency(session, window);
                         Demote(session, window);
                     }
+                }
+
+                if (gameSessionIsForeground)
+                {
+                    _ = RefreshInputHandoffLocked(session);
                 }
 
                 return;
@@ -605,11 +824,11 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
                     Promote(session, window);
                 }
 
+                _ = RefreshInputHandoffLocked(session);
+
                 return;
             }
 
-            OverlayWindowState? changedWindow = session.Windows.FirstOrDefault(
-                window => window.Identity.Handle == windowEvent.WindowHandle);
             if (changedWindow is null)
             {
                 return;
@@ -630,26 +849,136 @@ public sealed class OverlayCompatibilityService : IOverlayCompatibilityService
             {
                 Promote(session, changedWindow);
             }
+
+            _ = RefreshInputHandoffLocked(session);
         }
     }
 
-    private bool IsGameSessionForeground(
+    private static bool IsExactGameSessionForeground(
+        OverlayCompatibilitySession session,
+        nint windowHandle) =>
+        windowHandle != nint.Zero
+        && (windowHandle == session.Request.SourceWindowHandle
+            || windowHandle == session.ScalingWindowHandle);
+
+    private bool IsTrackedOverlayWindow(
         OverlayCompatibilitySession session,
         nint windowHandle)
     {
-        if (windowHandle == session.Request.SourceWindowHandle
-            || windowHandle == session.ScalingWindowHandle
-            || session.TracksWindow(windowHandle))
+        if (windowHandle == nint.Zero)
         {
-            return true;
+            return false;
         }
 
-        OverlayWindowSnapshot? foreground = _windowApi.Inspect(windowHandle);
-        return foreground is not null
-            && (foreground.ProcessId == session.Request.SourceProcessId
-                || foreground.ProcessId == session.ScalingProcessId
-                || session.Windows.Any(
-                    window => window.Identity.ProcessId == foreground.ProcessId));
+        OverlayWindowState? tracked = session.Windows.FirstOrDefault(
+            window => window.Identity.Handle == windowHandle);
+        return tracked is not null
+            && SameWindow(tracked.Identity, _windowApi.Inspect(windowHandle));
+    }
+
+    private void UpdateInputHandoff(
+        OverlayCompatibilitySession session,
+        OverlayWindowState window,
+        WindowPlacementPoint effectivePointer)
+    {
+        if (OverlayPlacementPlanner.IsEqLegendsCompanionOverlay(window.Identity))
+        {
+            // Companion dynamically owns WS_EX_TRANSPARENT through Electron's
+            // lock/click-through control. Never race or overwrite that choice.
+            return;
+        }
+
+        if (window.Identity.IsInputTransparent)
+        {
+            return;
+        }
+
+        OverlayWindowSnapshot? current = _windowApi.Inspect(window.Identity.Handle);
+        if (!SameWindow(window.Identity, current))
+        {
+            window.IsInputTransparentByService = false;
+            return;
+        }
+
+        bool shadowsSource = current!.IsVisible
+            && !current.IsMinimized
+            && OverlayPlacementPlanner.Intersects(
+                current.Bounds,
+                session.Request.SourceRegion);
+        bool pointerIsOverVisibleOverlay = OverlayPlacementPlanner.Contains(
+            current.Bounds,
+            effectivePointer);
+        if (!shadowsSource || pointerIsOverVisibleOverlay)
+        {
+            RestoreInputTransparency(session, window);
+            return;
+        }
+
+        if (current.IsInputTransparent)
+        {
+            // Respect click-through behavior applied by the companion itself. Only
+            // cleanup a style change that this exact session successfully made.
+            return;
+        }
+
+        bool accepted = _windowApi.SetInputTransparentWithoutActivation(
+            window.Identity.Handle,
+            inputTransparent: true);
+        OverlayWindowSnapshot? updated = _windowApi.Inspect(window.Identity.Handle);
+        bool applied = SameWindow(window.Identity, updated)
+            && updated!.IsInputTransparent;
+        window.IsInputTransparentByService = applied;
+        if (!accepted || !applied)
+        {
+            session.AddWarning(
+                $"input-pass-through:{window.Identity.Handle}",
+                "Windows could not make one hidden companion-overlay shadow "
+                    + "temporarily click-through. The visible overlay stayed "
+                    + "clickable, but it may cover part of the scaled game.");
+        }
+    }
+
+    private void RestoreInputTransparency(
+        OverlayCompatibilitySession session,
+        OverlayWindowState window)
+    {
+        if (!window.IsInputTransparentByService)
+        {
+            return;
+        }
+
+        OverlayWindowSnapshot? current = _windowApi.Inspect(window.Identity.Handle);
+        if (!SameWindow(window.Identity, current))
+        {
+            window.IsInputTransparentByService = false;
+            return;
+        }
+
+        if (!current!.IsInputTransparent)
+        {
+            window.IsInputTransparentByService = false;
+            return;
+        }
+
+        bool accepted = _windowApi.SetInputTransparentWithoutActivation(
+            window.Identity.Handle,
+            inputTransparent: false);
+        OverlayWindowSnapshot? updated = _windowApi.Inspect(window.Identity.Handle);
+        bool restored = SameWindow(window.Identity, updated)
+            && !updated!.IsInputTransparent;
+        if (restored)
+        {
+            window.IsInputTransparentByService = false;
+        }
+
+        if (!accepted || !restored)
+        {
+            session.AddWarning(
+                $"restore-input:{window.Identity.Handle}",
+                "A companion overlay could not have its original mouse-input "
+                    + "behavior restored. Stop scaling or restart that overlay "
+                    + "before interacting with it.");
+        }
     }
 
     private void Demote(
@@ -730,6 +1059,29 @@ public static class OverlayPlacementPlanner
 {
     private const double MaximumOverlayAreaFraction = 0.45;
 
+    private static readonly HashSet<string> EqLegendsCompanionExecutables = new(
+        [
+            "EQ Legends Companion.exe",
+            "everquest-companion.exe",
+            "eq-tools.exe",
+        ],
+        StringComparer.OrdinalIgnoreCase);
+
+    private static readonly HashSet<string> EqLegendsCompanionOverlayTitles = new(
+        [
+            "Buff Timer Overlay",
+            "Celebration Overlay",
+            "Debuff Timer Overlay",
+            "Event Log Overlay",
+            "Fight Healing Overlay",
+            "Fight Overlay",
+            "Respawn Timer Overlay",
+            "XP Overlay",
+            "Zone Healing Overlay",
+            "Zone Overlay",
+        ],
+        StringComparer.OrdinalIgnoreCase);
+
     private static readonly HashSet<string> ExcludedClasses = new(
         [
             "#32768",
@@ -783,8 +1135,18 @@ public static class OverlayPlacementPlanner
             || (!snapshot.IsTopmost && !allowTemporaryNonTopmost)
             || snapshot.Bounds.Width <= 0
             || snapshot.Bounds.Height <= 0
+            || snapshot.Bounds.Width > targetRegion.Width
+            || snapshot.Bounds.Height > targetRegion.Height
             || ExcludedClasses.Contains(snapshot.ClassName)
             || !Intersects(snapshot.Bounds, targetRegion))
+        {
+            return false;
+        }
+
+        // EQ Legends Companion's dashboard shares its executable and process ID
+        // with the HUDs. Only its Electron toolbar windows are overlays; never
+        // promote the normal dashboard even if another utility makes it topmost.
+        if (IsEqLegendsCompanionProcess(snapshot) && !snapshot.IsToolWindow)
         {
             return false;
         }
@@ -796,9 +1158,7 @@ public static class OverlayPlacementPlanner
             return false;
         }
 
-        string? processName = snapshot.ExecutablePath is null
-            ? null
-            : Path.GetFileName(snapshot.ExecutablePath);
+        string? processName = TryGetExecutableName(snapshot.ExecutablePath);
         if (processName is not null && ExcludedProcesses.Contains(processName))
         {
             return false;
@@ -814,6 +1174,11 @@ public static class OverlayPlacementPlanner
     public static bool IsRecognizedCompanion(OverlayWindowSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        if (IsEqLegendsCompanionOverlay(snapshot))
+        {
+            return true;
+        }
+
         string identity = string.Join(
             ' ',
             snapshot.Title,
@@ -832,6 +1197,48 @@ public static class OverlayPlacementPlanner
         ];
         return companionTerms.Any(
             term => identity.Contains(term, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Identifies only EQ Legends Companion's floating Electron toolbar windows.
+    /// Its full dashboard uses the same process and executable but is not a tool
+    /// window, so a process-name-only match would incorrectly promote the app UI.
+    /// </summary>
+    public static bool IsEqLegendsCompanionOverlay(
+        OverlayWindowSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return snapshot.IsToolWindow
+            && IsEqLegendsCompanionProcess(snapshot)
+            && EqLegendsCompanionOverlayTitles.Contains(snapshot.Title);
+    }
+
+    private static bool IsEqLegendsCompanionProcess(
+        OverlayWindowSnapshot snapshot)
+    {
+        string? executableName = TryGetExecutableName(snapshot.ExecutablePath);
+        return executableName is not null
+            && EqLegendsCompanionExecutables.Contains(executableName);
+    }
+
+    private static string? TryGetExecutableName(string? executablePath)
+    {
+        if (executablePath is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Path.GetFileName(executablePath);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or NotSupportedException
+                or PathTooLongException)
+        {
+            return null;
+        }
     }
 
     public static bool ShouldMapPosition(PixelRect sourceRegion, PixelRect overlayBounds)
@@ -948,8 +1355,40 @@ public static class OverlayPlacementPlanner
         return intersectionWidth * intersectionHeight;
     }
 
-    private static bool Intersects(PixelRect left, PixelRect right) =>
+    public static bool Intersects(PixelRect left, PixelRect right) =>
         IntersectionArea(left, right) > 0;
+
+    public static bool Contains(
+        PixelRect bounds,
+        WindowPlacementPoint point) =>
+        point.X >= bounds.X
+        && point.X < (long)bounds.X + bounds.Width
+        && point.Y >= bounds.Y
+        && point.Y < (long)bounds.Y + bounds.Height;
+
+    public static WindowPlacementPoint ResolveEffectivePointer(
+        WindowPlacementPoint rawPointer,
+        PixelRect sourceRegion,
+        PixelRect destinationRegion,
+        nint scalingWindowHandle,
+        nint windowAtRawPointer)
+    {
+        ValidateRegion(sourceRegion, nameof(sourceRegion));
+        ValidateRegion(destinationRegion, nameof(destinationRegion));
+        if (!Contains(sourceRegion, rawPointer)
+            || windowAtRawPointer == scalingWindowHandle)
+        {
+            return rawPointer;
+        }
+
+        PixelPoint mapped = CoordinateMappingValidator.SourceToDestination(
+            new PixelPoint(rawPointer.X, rawPointer.Y),
+            sourceRegion,
+            destinationRegion);
+        return new WindowPlacementPoint(
+            checked((int)mapped.X),
+            checked((int)mapped.Y));
+    }
 
     private static bool IsUnderDirectory(string filePath, string directory)
     {
@@ -1049,6 +1488,28 @@ internal sealed class NativeOverlayWindowApi : IOverlayWindowApi
             (extendedStyle & NativeMethods.WsExTransparent) != 0);
     }
 
+    public nint GetForegroundWindowHandle() => NativeMethods.GetForegroundWindow();
+
+    public bool TryGetCursorPosition(out WindowPlacementPoint position)
+    {
+        if (NativeMethods.GetCursorPos(out NativeMethods.NativePoint nativePoint))
+        {
+            position = new WindowPlacementPoint(nativePoint.X, nativePoint.Y);
+            return true;
+        }
+
+        position = default;
+        return false;
+    }
+
+    public nint WindowFromPoint(WindowPlacementPoint position) =>
+        NativeMethods.WindowFromPoint(
+            new NativeMethods.NativePoint
+            {
+                X = position.X,
+                Y = position.Y,
+            });
+
     public bool SetTopmostWithoutActivation(nint windowHandle, bool topmost) =>
         NativeMethods.SetWindowPos(
             windowHandle,
@@ -1063,6 +1524,51 @@ internal sealed class NativeOverlayWindowApi : IOverlayWindowApi
                 | NativeMethods.SwpNoSize
                 | NativeMethods.SwpNoActivate
                 | NativeMethods.SwpNoOwnerZOrder);
+
+    public bool SetInputTransparentWithoutActivation(
+        nint windowHandle,
+        bool inputTransparent)
+    {
+        if (windowHandle == nint.Zero || !NativeMethods.IsWindow(windowHandle))
+        {
+            return false;
+        }
+
+        Marshal.SetLastPInvokeError(0);
+        nint currentValue = NativeMethods.GetWindowLongPtr(
+            windowHandle,
+            NativeMethods.GwlExStyle);
+        if (currentValue == nint.Zero && Marshal.GetLastPInvokeError() != 0)
+        {
+            return false;
+        }
+
+        uint currentStyle = unchecked((uint)currentValue.ToInt64());
+        uint updatedStyle = inputTransparent
+            ? currentStyle | NativeMethods.WsExTransparent
+            : currentStyle & ~NativeMethods.WsExTransparent;
+        if (updatedStyle == currentStyle)
+        {
+            return true;
+        }
+
+        nint updatedValue = nint.Size == sizeof(long)
+            ? new nint((long)updatedStyle)
+            : new nint(unchecked((int)updatedStyle));
+        Marshal.SetLastPInvokeError(0);
+        nint previousValue = NativeMethods.SetWindowLongPtr(
+            windowHandle,
+            NativeMethods.GwlExStyle,
+            updatedValue);
+        if (previousValue == nint.Zero && Marshal.GetLastPInvokeError() != 0)
+        {
+            return false;
+        }
+
+        // SetWindowLongPtr changes only the requested style bit and never activates,
+        // moves, resizes, or changes the z-order of the companion window.
+        return true;
+    }
 
     public bool MoveWithoutResizing(nint windowHandle, PixelRect bounds) =>
         NativeMethods.SetWindowPos(
@@ -1117,6 +1623,7 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
     private Exception? _startupFailure;
     private uint _observerThreadId;
     private nint _foregroundHook;
+    private nint _showHook;
     private nint _zOrderHook;
     private int _disposed;
 
@@ -1190,6 +1697,14 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
                 0,
                 0,
                 NativeMethods.WineventOutOfContext);
+            _showHook = NativeMethods.SetWinEventHook(
+                NativeMethods.EventObjectShow,
+                NativeMethods.EventObjectShow,
+                nint.Zero,
+                _nativeCallback,
+                0,
+                0,
+                NativeMethods.WineventOutOfContext);
             _zOrderHook = NativeMethods.SetWinEventHook(
                 NativeMethods.EventObjectReorder,
                 NativeMethods.EventObjectReorder,
@@ -1198,7 +1713,9 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
                 0,
                 0,
                 NativeMethods.WineventOutOfContext);
-            if (_foregroundHook == nint.Zero || _zOrderHook == nint.Zero)
+            if (_foregroundHook == nint.Zero
+                || _showHook == nint.Zero
+                || _zOrderHook == nint.Zero)
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
@@ -1242,6 +1759,12 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
                 _zOrderHook = nint.Zero;
             }
 
+            if (_showHook != nint.Zero)
+            {
+                _ = NativeMethods.UnhookWinEvent(_showHook);
+                _showHook = nint.Zero;
+            }
+
             _observerThreadId = 0;
             _started.Set();
         }
@@ -1257,11 +1780,17 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
         uint eventTime)
     {
         _ = eventHook;
-        _ = objectId;
-        _ = childId;
         _ = eventThreadId;
         _ = eventTime;
         if (Volatile.Read(ref _disposed) != 0 || windowHandle == nint.Zero)
+        {
+            return;
+        }
+
+        if ((eventType == NativeMethods.EventObjectShow
+                || eventType == NativeMethods.EventObjectReorder)
+            && (objectId != NativeMethods.ObjIdWindow
+                || childId != NativeMethods.ChildIdSelf))
         {
             return;
         }
@@ -1270,6 +1799,8 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
         {
             NativeMethods.EventSystemForeground =>
                 OverlayWindowEventKind.ForegroundChanged,
+            NativeMethods.EventObjectShow =>
+                OverlayWindowEventKind.Shown,
             NativeMethods.EventObjectReorder =>
                 OverlayWindowEventKind.ZOrderChanged,
             _ => null,
@@ -1280,11 +1811,9 @@ internal sealed class NativeOverlayWindowOrderObserver : IDisposable
             {
                 _callback(new OverlayWindowEvent(kind.Value, windowHandle));
             }
-            catch (Exception exception) when (
-                exception is Win32Exception
-                    or InvalidOperationException
-                    or NotSupportedException)
+            catch (Exception exception)
             {
+                _ = exception;
                 // Native accessibility callbacks must never unwind through user32.
             }
         }

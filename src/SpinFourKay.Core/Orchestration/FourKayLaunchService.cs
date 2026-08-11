@@ -468,12 +468,16 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
                 state.ResolutionPlan.SourceResolution,
                 targetMonitor);
             EnsureSafePlacement(placement);
-            sourceWindow = await _windowDiscovery.WaitForStableVisibleWindowAsync(
-                gameProcess,
-                state.ResolutionPlan.SourceResolution,
-                request.WindowTimeout,
-                requiredStablePolls: 3,
-                cancellationToken).ConfigureAwait(false);
+            // EverQuest can keep stale mouse-hit geometry briefly after its
+            // top-level window settles. Require a full, bounded second of the
+            // exact post-placement HWND and client size before Magpie starts.
+            sourceWindow = await WindowInteractionReadinessPolicy
+                .WaitForManagedLaunchAsync(
+                    _windowDiscovery,
+                    gameProcess,
+                    state.ResolutionPlan.SourceResolution,
+                    request.WindowTimeout,
+                    cancellationToken).ConfigureAwait(false);
             await ValidatePreparedClientConfigurationAsync(
                 state,
                 request.LauncherPath,
@@ -2776,8 +2780,12 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
         PixelSize target = plan.TargetResolution;
         if (source.Width > target.Width
             || source.Height > target.Height
-            || source.Width < 640
-            || source.Height < 480)
+            || source.Width < Math.Min(
+                ResolutionPlanner.MinimumInteractiveWidth,
+                target.Width)
+            || source.Height < Math.Min(
+                ResolutionPlanner.MinimumInteractiveHeight,
+                target.Height))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(request),

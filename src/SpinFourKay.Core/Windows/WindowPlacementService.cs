@@ -38,6 +38,22 @@ public sealed record WindowPlacementPlan(
 /// </summary>
 public static class WindowPlacementPlanner
 {
+    /// <summary>
+    /// Returns true when the existing physical client rectangle already has
+    /// the requested size and is wholly contained by the selected monitor.
+    /// Preserving it avoids changing a running legacy game's cached mouse-hit
+    /// geometry merely to make the source window look centered.
+    /// </summary>
+    public static bool CanPreserveCurrentClientArea(
+        PixelRect currentClientBounds,
+        PixelSize requestedClientSize,
+        MonitorDescriptor monitor)
+    {
+        ArgumentNullException.ThrowIfNull(monitor);
+        return currentClientBounds.Size == requestedClientSize
+            && Contains(monitor.Bounds, currentClientBounds);
+    }
+
     public static WindowPlacementPlan Create(
         PixelSize clientSize,
         MonitorDescriptor monitor,
@@ -215,7 +231,26 @@ public sealed class WindowPlacementService : IWindowPlacementService
         MonitorDescriptor monitor = ResolveMonitor(targetMonitor);
         List<string> issues = [];
 
-        if (NativeMethods.IsZoomed(windowHandle) || NativeMethods.IsIconic(windowHandle))
+        bool needsRestore =
+            NativeMethods.IsZoomed(windowHandle) || NativeMethods.IsIconic(windowHandle);
+        PixelRect? currentClientBounds = TryGetClientBounds(windowHandle);
+        if (!needsRestore
+            && currentClientBounds is { } existingClientBounds
+            && WindowPlacementPlanner.CanPreserveCurrentClientArea(
+                existingClientBounds,
+                clientSize,
+                monitor))
+        {
+            return new WindowPlacementResult(
+                IsExactAndOnScreen: true,
+                clientSize,
+                ActualClientSize: existingClientBounds.Size,
+                WindowBounds: TryGetWindowBounds(windowHandle),
+                monitor,
+                issues);
+        }
+
+        if (needsRestore)
         {
             _ = NativeMethods.ShowWindow(windowHandle, NativeMethods.SwRestore);
         }
