@@ -7,6 +7,12 @@ using SpinFourKay.Core.Windows;
 
 namespace SpinFourKay.Core.Orchestration;
 
+public enum FourKayGameStartMode
+{
+    OfficialLauncher,
+    SpinTextureEnhanced,
+}
+
 public sealed record FourKayLaunchRequest
 {
     public required FourKayPreparedState PreparedState { get; init; }
@@ -16,6 +22,9 @@ public sealed record FourKayLaunchRequest
     public required string MagpieDirectory { get; init; }
 
     public IReadOnlyList<string> LauncherArguments { get; init; } = [];
+
+    public FourKayGameStartMode StartMode { get; init; } =
+        FourKayGameStartMode.OfficialLauncher;
 
     public TimeSpan GameStartTimeout { get; init; } = TimeSpan.FromMinutes(3);
 
@@ -425,7 +434,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
             .ConfigureAwait(false);
         await ValidatePreparedClientConfigurationAsync(
             state,
-            request.LauncherPath,
+            request,
             cancellationToken)
             .ConfigureAwait(false);
         EnsureTargetMonitorMatchesPlan(state);
@@ -446,9 +455,9 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
         {
             launcher = StartLauncher(request);
             ProcessDescriptor gameDescriptor =
-                await _processDiscovery.WaitForExecutableAsync(
-                    state.EqGamePath,
-                    request.GameStartTimeout,
+                await WaitForManagedGameStartAsync(
+                    request,
+                    launcher,
                     cancellationToken).ConfigureAwait(false);
             gameProcess = GetLiveProcess(gameDescriptor.ProcessId);
             WindowDescriptor sourceWindow =
@@ -480,7 +489,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
                     cancellationToken).ConfigureAwait(false);
             await ValidatePreparedClientConfigurationAsync(
                 state,
-                request.LauncherPath,
+                request,
                 cancellationToken).ConfigureAwait(false);
 
             FourKayLaunchResult result = await ConfigureAndStartScalingAsync(
@@ -490,7 +499,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
                 placement,
                 request.MagpieDirectory,
                 state.ResolutionPlan.Filter,
-                request.LauncherPath,
+                GetMagpieLauncherPath(request),
                 request.RcasSharpness,
                 request.AntiAliasing,
                 request.MaximumFrameRate,
@@ -504,7 +513,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
                 finalConfigurationGuard: token =>
                     ValidatePreparedClientConfigurationAsync(
                         state,
-                        request.LauncherPath,
+                        request,
                         token),
                 attachWindowRecovery: null,
                 cancellationToken).ConfigureAwait(false);
@@ -1874,7 +1883,68 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
         }
 
         return Process.Start(startInfo)
-            ?? throw new InvalidOperationException("Windows did not start the Legends launcher.");
+            ?? throw new InvalidOperationException(
+                "Windows did not start the selected EverQuest launch application.");
+    }
+
+    private async Task<ProcessDescriptor> WaitForManagedGameStartAsync(
+        FourKayLaunchRequest request,
+        Process launchProcess,
+        CancellationToken cancellationToken)
+    {
+        if (request.StartMode == FourKayGameStartMode.OfficialLauncher)
+        {
+            return await _processDiscovery.WaitForExecutableAsync(
+                request.PreparedState.EqGamePath,
+                request.GameStartTimeout,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + request.GameStartTimeout;
+        int exitedWrapperGracePolls = 0;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyList<ProcessDescriptor> matches =
+                _processDiscovery.FindByExecutablePath(
+                    request.PreparedState.EqGamePath);
+            if (matches.Count > 0)
+            {
+                return matches[0];
+            }
+
+            if (launchProcess.HasExited)
+            {
+                exitedWrapperGracePolls++;
+                if (exitedWrapperGracePolls >= 5)
+                {
+                    throw new InvalidOperationException(
+                        "SpinTexture did not start Enhanced EverQuest. Review any "
+                            + "SpinTexture message, reopen SpinTexture to verify that "
+                            + "the enhanced pack is active, then try Play Enhanced EQ "
+                            + "again. Your prepared UI layout will be recovered safely.");
+                }
+            }
+            else
+            {
+                exitedWrapperGracePolls = 0;
+            }
+
+            TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            TimeSpan delay = remaining < TimeSpan.FromMilliseconds(150)
+                ? remaining
+                : TimeSpan.FromMilliseconds(150);
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException(
+            "Timed out waiting for Enhanced EverQuest to start through SpinTexture. "
+                + "Review SpinTexture's pack status and try again.");
     }
 
     private static Process GetLiveProcess(int processId)
@@ -2483,16 +2553,15 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
 
     private async Task ValidatePreparedClientConfigurationAsync(
         FourKayPreparedState state,
-        string launcherPath,
+        FourKayLaunchRequest request,
         CancellationToken cancellationToken)
     {
         string eqDirectory = Path.GetFullPath(state.EqDirectory);
+        ValidateLaunchTargetBinding(request, eqDirectory);
         string expectedIniPath = Path.GetFullPath(
             Path.Combine(eqDirectory, "eqclient.ini"));
         string expectedGamePath = Path.GetFullPath(
             Path.Combine(eqDirectory, "eqgame.exe"));
-        string expectedLauncherPath = Path.GetFullPath(
-            Path.Combine(eqDirectory, "LaunchPad.exe"));
         string journalIniPath = Path.GetFullPath(state.EqClientIniPath);
         if (!string.Equals(
             expectedIniPath,
@@ -2502,10 +2571,6 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
                 expectedGamePath,
                 Path.GetFullPath(state.EqGamePath),
                 StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(
-                expectedLauncherPath,
-                Path.GetFullPath(launcherPath),
-                StringComparison.OrdinalIgnoreCase)
             || state.DpiCompatibility is null
             || !string.Equals(
                 expectedGamePath,
@@ -2513,7 +2578,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
                 StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException(
-                "The prepared journal, launcher, DPI state, and game executable do "
+                "The prepared journal, launch target, DPI state, and game executable do "
                     + "not all belong to the same selected EverQuest Legends "
                     + "directory. Launch was stopped.");
         }
@@ -2650,6 +2715,23 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
         ArgumentNullException.ThrowIfNull(request.PreparedState);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.LauncherPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.MagpieDirectory);
+        if (!Enum.IsDefined(request.StartMode))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                "The requested game start mode is not supported.");
+        }
+
+        if (request.LauncherArguments is null)
+        {
+            throw new ArgumentNullException(
+                nameof(request),
+                "Launch arguments cannot be null.");
+        }
+
+        ValidateLaunchTargetBinding(
+            request,
+            Path.GetFullPath(request.PreparedState.EqDirectory));
         if (request.PreparedState.Status is not (
                 FourKayJournalStatus.Prepared
                 or FourKayJournalStatus.Committed))
@@ -2672,6 +2754,75 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
             request.WindowTimeout,
             request.ScalingTimeout);
     }
+
+    private static void ValidateLaunchTargetBinding(
+        FourKayLaunchRequest request,
+        string eqDirectory)
+    {
+        string fullEqDirectory = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(eqDirectory));
+        string launchTargetPath = Path.GetFullPath(request.LauncherPath);
+        switch (request.StartMode)
+        {
+            case FourKayGameStartMode.OfficialLauncher:
+                string expectedLauncherPath = Path.GetFullPath(
+                    Path.Combine(fullEqDirectory, "LaunchPad.exe"));
+                if (!string.Equals(
+                        launchTargetPath,
+                        expectedLauncherPath,
+                        StringComparison.OrdinalIgnoreCase)
+                    || request.LauncherArguments.Count != 0)
+                {
+                    throw new InvalidDataException(
+                        "Normal launch requires the exact LaunchPad.exe in the "
+                            + "selected EverQuest Legends folder and no custom "
+                            + "arguments. Launch was stopped.");
+                }
+
+                break;
+
+            case FourKayGameStartMode.SpinTextureEnhanced:
+                bool exactExecutableName = string.Equals(
+                    Path.GetFileName(launchTargetPath),
+                    "SpinTexture.exe",
+                    StringComparison.OrdinalIgnoreCase);
+                bool exactArguments = request.LauncherArguments.Count == 2
+                    && string.Equals(
+                        request.LauncherArguments[0],
+                        "--play-enhanced",
+                        StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(request.LauncherArguments[1]);
+                string? requestedEqDirectory = exactArguments
+                    ? Path.TrimEndingDirectorySeparator(
+                        Path.GetFullPath(request.LauncherArguments[1]))
+                    : null;
+                if (!exactExecutableName
+                    || !exactArguments
+                    || !string.Equals(
+                        requestedEqDirectory,
+                        fullEqDirectory,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "Enhanced launch requires the exact SpinTexture.exe wrapper "
+                            + "with only '--play-enhanced' and the selected EverQuest "
+                            + "Legends folder. Tickets, credentials, and arbitrary "
+                            + "direct-launch arguments are not accepted.");
+                }
+
+                break;
+
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(request),
+                    "The requested game start mode is not supported.");
+        }
+    }
+
+    private static string? GetMagpieLauncherPath(FourKayLaunchRequest request) =>
+        request.StartMode == FourKayGameStartMode.OfficialLauncher
+            ? request.LauncherPath
+            : null;
 
     private static void ValidateAttachRequest(FourKayAttachRequest request)
     {

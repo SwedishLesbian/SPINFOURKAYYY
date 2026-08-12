@@ -25,6 +25,7 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 ## What it does
 
 - Offers every UI size from **100% to 200%** in simple 1% steps.
+- Remembers your Legends folder, monitor, size, quality, and overlay choices.
 - Automatically fits your existing layout to the size you choose.
 - Remembers layout changes separately for each size.
 - Restores your native layout when EverQuest exits.
@@ -42,6 +43,14 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 5. Keep SpinFOURKAYYY open while playing and exit EverQuest normally when finished.
 
 Your first launch at a new size may take a moment while the app prepares a matching copy of your current layout. After that, you can play normally and move windows or edit hotbars as usual. Those layout changes are saved for that size when the game closes.
+
+The next time you open SpinFOURKAYYY, your last setup is ready to use again.
+
+## Play with SpinTexture
+
+If you use [SpinTexture](https://itsspin.github.io/spintexture/), install and verify your enhanced texture pack there first. Then click **Play Enhanced EQ** in SpinFOURKAYYY and choose `SpinTexture.exe` the first time. The app remembers that location, asks SpinTexture to verify the installed pack, starts EverQuest without LaunchPad replacing it, and applies your normal SpinFOURKAYYY layout and scaling choices.
+
+Use **Start EverQuest for me** whenever the game needs an update. After updating, reinstall or verify the enhanced pack in SpinTexture before using **Play Enhanced EQ** again. The enhanced flow never reads or reuses account credentials; sign-in behavior may differ from the normal launcher.
 
 ## Choosing a size
 

@@ -10,6 +10,7 @@ using SpinFourKay.Core.Display;
 using SpinFourKay.Core.Layouts;
 using SpinFourKay.Core.Magpie;
 using SpinFourKay.Core.Orchestration;
+using SpinFourKay.Core.Preferences;
 using SpinFourKay.Core.Windows;
 
 namespace SpinFourKay.SelfTest;
@@ -68,6 +69,15 @@ internal static class Program
         runner.Add(
             "UI layout / rollback and interrupted restore recovery",
             UiLayoutRollbackAndInterruptedRestoreRecoveryAsync);
+        runner.Add(
+            "UI layout / stale session recovered before relaunch",
+            UiLayoutStaleSessionRecoveredBeforeRelaunchAsync);
+        runner.Add(
+            "Preferences / complete atomic round trip",
+            PreferencesAtomicRoundTripAsync);
+        runner.Add(
+            "Preferences / corruption and invalid values use safe defaults",
+            PreferencesCorruptionAndValidationAsync);
         runner.Add("Configuration / atomic fake-client edit", ConfigurationAtomicFakeClientEditAsync);
         runner.Add("Configuration / native UI-scale guard", ConfigurationNativeUiScaleGuardAsync);
         runner.Add("Configuration / missing file and cancellation", ConfigurationErrorPathsAsync);
@@ -1213,6 +1223,174 @@ internal static class Program
             originalEqClient,
             await File.ReadAllBytesAsync(eqClientPath).ConfigureAwait(false));
         Assert.Null(await service.LoadActiveAsync(eqDirectory, stateRoot).ConfigureAwait(false));
+    }
+
+    private static async Task UiLayoutStaleSessionRecoveredBeforeRelaunchAsync()
+    {
+        await using TempDirectory temp = new();
+        string eqDirectory = Path.Combine(temp.Path, "User Selected EQ");
+        string stateRoot = Path.Combine(temp.Path, "Local App State");
+        Directory.CreateDirectory(eqDirectory);
+        string eqClientPath = Path.Combine(eqDirectory, "eqclient.ini");
+        byte[] originalEqClient = Encoding.ASCII.GetBytes(
+            "[Defaults]\r\nUIScale=1\r\n[VideoMode]\r\nWidth=3440\r\n"
+                + "Height=1440\r\nWindowedWidth=1720\r\n"
+                + "WindowedHeight=720\r\nFullscreen=1\r\n");
+        await File.WriteAllBytesAsync(eqClientPath, originalEqClient)
+            .ConfigureAwait(false);
+        string layoutPath = Path.Combine(eqDirectory, "UI_Spin_qeynos_LO1.ini");
+        byte[] originalLayout = Encoding.ASCII.GetBytes(
+            "[Main]\r\nUISkin=custom\r\n[Chat]\r\nXPos=10.000000%\r\n"
+                + "Width=550\r\nHeight=220\r\n");
+        await File.WriteAllBytesAsync(layoutPath, originalLayout)
+            .ConfigureAwait(false);
+
+        UiLayoutProfileService service = new();
+        UiLayoutPrepareRequest request = new()
+        {
+            EqDirectory = eqDirectory,
+            StateRoot = stateRoot,
+            NativeResolution = new PixelSize(3440, 1440),
+            ScaledResolution = new PixelSize(2752, 1152),
+        };
+        UiLayoutPrepareResult interrupted = await service.PrepareAsync(request)
+            .ConfigureAwait(false);
+        InvalidOperationException blocked =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => service.PrepareAsync(request)).ConfigureAwait(false);
+        Assert.Contains("still active", blocked.Message);
+
+        // This mirrors the application pre-launch recovery after it has
+        // positively verified that no eqgame process is running.
+        UiLayoutSessionState? discovered = await service.LoadActiveAsync(
+            eqDirectory,
+            stateRoot).ConfigureAwait(false);
+        Assert.Equal(interrupted.State.SessionId, discovered?.SessionId);
+        _ = await service.CompleteAsync(discovered!).ConfigureAwait(false);
+        Assert.Null(await service.LoadActiveAsync(eqDirectory, stateRoot)
+            .ConfigureAwait(false));
+        Assert.SequenceEqual(
+            originalLayout,
+            await File.ReadAllBytesAsync(layoutPath).ConfigureAwait(false));
+        Assert.SequenceEqual(
+            originalEqClient,
+            await File.ReadAllBytesAsync(eqClientPath).ConfigureAwait(false));
+
+        UiLayoutPrepareResult next = await service.PrepareAsync(request)
+            .ConfigureAwait(false);
+        Assert.Equal(UiLayoutSessionStatus.Active, next.State.Status);
+        await service.RollbackAsync(next.State).ConfigureAwait(false);
+    }
+
+    private static async Task PreferencesAtomicRoundTripAsync()
+    {
+        await using TempDirectory temp = new();
+        string preferencesPath = Path.Combine(
+            temp.Path,
+            "LocalAppData",
+            "SpinFOURKAYYY",
+            "preferences.json");
+        using UserPreferencesStore store = new(preferencesPath);
+        UserPreferences initial = new()
+        {
+            LegendsDirectory = Path.Combine(temp.Path, "My Legends Install"),
+            SpinTextureExecutablePath = Path.Combine(
+                temp.Path,
+                "Tools",
+                "SpinTexture.exe"),
+            TargetDisplayBounds = new PixelRect(-3840, 0, 3840, 2160),
+            UiScaleHundredths = 137,
+            ScalingFilter = ScalingFilter.Fsr,
+            AntiAliasing = AntiAliasingMode.Smaa,
+            ClarityPercent = 15,
+            MaintainTopmostOverlays = false,
+            UiCompatibilityMode = FourKayUiCompatibilityMode.SpinUiStrict,
+            SpinUiPresetIndex = 1,
+        };
+
+        UserPreferencesLoadResult missing = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.False(missing.WasLoaded);
+        Assert.Null(missing.Warning);
+        Assert.Equal(125, missing.Preferences.UiScaleHundredths);
+
+        await store.SaveAsync(initial).ConfigureAwait(false);
+        UserPreferencesLoadResult loaded = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.True(loaded.WasLoaded);
+        Assert.Null(loaded.Warning);
+        Assert.Equal(
+            Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(initial.LegendsDirectory!)),
+            loaded.Preferences.LegendsDirectory);
+        Assert.Equal(
+            Path.GetFullPath(initial.SpinTextureExecutablePath!),
+            loaded.Preferences.SpinTextureExecutablePath);
+        Assert.Equal(initial.TargetDisplayBounds, loaded.Preferences.TargetDisplayBounds);
+        Assert.Equal(137, loaded.Preferences.UiScaleHundredths);
+        Assert.Equal(ScalingFilter.Fsr, loaded.Preferences.ScalingFilter);
+        Assert.Equal(AntiAliasingMode.Smaa, loaded.Preferences.AntiAliasing);
+        Assert.Equal(15, loaded.Preferences.ClarityPercent);
+        Assert.False(loaded.Preferences.MaintainTopmostOverlays);
+        Assert.Equal(
+            FourKayUiCompatibilityMode.SpinUiStrict,
+            loaded.Preferences.UiCompatibilityMode);
+        Assert.Equal(1, loaded.Preferences.SpinUiPresetIndex);
+
+        await store.SaveAsync(initial with
+        {
+            UiScaleHundredths = 110,
+            ScalingFilter = ScalingFilter.Lanczos,
+        }).ConfigureAwait(false);
+        UserPreferencesLoadResult replaced = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.Equal(110, replaced.Preferences.UiScaleHundredths);
+        Assert.Equal(ScalingFilter.Lanczos, replaced.Preferences.ScalingFilter);
+        Assert.Empty(Directory.EnumerateFiles(
+            Path.GetDirectoryName(preferencesPath)!,
+            "*.tmp",
+            SearchOption.TopDirectoryOnly));
+    }
+
+    private static async Task PreferencesCorruptionAndValidationAsync()
+    {
+        await using TempDirectory temp = new();
+        string preferencesPath = Path.Combine(temp.Path, "preferences.json");
+        using UserPreferencesStore store = new(preferencesPath);
+
+        await File.WriteAllTextAsync(preferencesPath, "{not valid json")
+            .ConfigureAwait(false);
+        UserPreferencesLoadResult corrupt = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.False(corrupt.WasLoaded);
+        Assert.True(!string.IsNullOrWhiteSpace(corrupt.Warning));
+        Assert.Equal(125, corrupt.Preferences.UiScaleHundredths);
+        Assert.Equal(ScalingFilter.Nis, corrupt.Preferences.ScalingFilter);
+
+        await File.WriteAllTextAsync(
+            preferencesPath,
+            "{\"formatVersion\":99}").ConfigureAwait(false);
+        UserPreferencesLoadResult future = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.False(future.WasLoaded);
+        Assert.Contains("not supported", future.Warning!);
+
+        await store.SaveAsync(new UserPreferences()).ConfigureAwait(false);
+        byte[] valid = await File.ReadAllBytesAsync(preferencesPath)
+            .ConfigureAwait(false);
+        await Assert.ThrowsAnyAsync<ArgumentOutOfRangeException>(
+            () => store.SaveAsync(new UserPreferences
+            {
+                UiScaleHundredths = 99,
+            })).ConfigureAwait(false);
+        Assert.SequenceEqual(
+            valid,
+            await File.ReadAllBytesAsync(preferencesPath).ConfigureAwait(false));
+        await Assert.ThrowsAnyAsync<InvalidDataException>(
+            () => store.SaveAsync(new UserPreferences
+            {
+                UiCompatibilityMode = FourKayUiCompatibilityMode.UnspecifiedLegacy,
+            })).ConfigureAwait(false);
     }
 
     private static async Task ConfigurationAtomicFakeClientEditAsync()
@@ -5149,6 +5327,24 @@ internal static class Program
                     Status = FourKayJournalStatus.Committed,
                     KeepPreparedConfiguration = true,
                 })]);
+        MethodInfo getMagpieLauncherPath = typeof(FourKayLaunchService).GetMethod(
+            "GetMagpieLauncherPath",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new TestFailureException(
+                "The Magpie launcher-path policy is unavailable.");
+        FourKayLaunchRequest enhancedRequest = CreateLaunchRequest(prepared) with
+        {
+            StartMode = FourKayGameStartMode.SpinTextureEnhanced,
+            LauncherPath = Path.Combine(temp.Path, "SpinTexture.exe"),
+            LauncherArguments = ["--play-enhanced", prepared.EqDirectory],
+        };
+        _ = validateLaunchRequest.Invoke(null, [enhancedRequest]);
+        Assert.Null(getMagpieLauncherPath.Invoke(null, [enhancedRequest]));
+        Assert.Equal(
+            CreateLaunchRequest(prepared).LauncherPath,
+            getMagpieLauncherPath.Invoke(
+                null,
+                [CreateLaunchRequest(prepared)]));
 
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => service.LaunchAndScaleAsync(null!)).ConfigureAwait(false);
@@ -5171,6 +5367,35 @@ internal static class Program
             () => service.LaunchAndScaleAsync(
                 CreateLaunchRequest(prepared) with { MagpieDirectory = " " }))
             .ConfigureAwait(false);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => service.LaunchAndScaleAsync(
+                CreateLaunchRequest(prepared) with
+                {
+                    StartMode = (FourKayGameStartMode)999,
+                })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(
+                CreateLaunchRequest(prepared) with
+                {
+                    LauncherArguments = ["patchme"],
+                })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(enhancedRequest with
+            {
+                LauncherPath = Path.Combine(temp.Path, "UnknownTool.exe"),
+            })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(enhancedRequest with
+            {
+                LauncherArguments =
+                ["--play-enhanced", prepared.EqDirectory, "ticket"],
+            })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(enhancedRequest with
+            {
+                LauncherArguments =
+                ["--play-enhanced", Path.Combine(temp.Path, "Other EQ")],
+            })).ConfigureAwait(false);
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => service.LaunchAndScaleAsync(
                 CreateLaunchRequest(prepared) with { GameStartTimeout = TimeSpan.Zero }))
@@ -5358,12 +5583,7 @@ internal static class Program
                     CreateLaunchRequest(prepared with
                     {
                         EqGamePath = otherClient.EqGamePath,
-                    }) with
-                    {
-                        LauncherPath = Path.Combine(
-                            otherClient.EqDirectory,
-                            "LaunchPad.exe"),
-                    })).ConfigureAwait(false);
+                    }))).ConfigureAwait(false);
         Assert.Contains("same selected EverQuest Legends", crossClient.Message);
         Assert.Equal(0, launchProcesses.FindCalls);
         Assert.Equal(0, launchConfig.WriteCalls);
@@ -8693,7 +8913,7 @@ internal static class Program
         return new FourKayLaunchRequest
         {
             PreparedState = state,
-            LauncherPath = "LaunchPad.exe",
+            LauncherPath = Path.Combine(state.EqDirectory, "LaunchPad.exe"),
             MagpieDirectory = "Magpie",
             GameStartTimeout = TimeSpan.FromSeconds(1),
             WindowTimeout = TimeSpan.FromSeconds(1),
