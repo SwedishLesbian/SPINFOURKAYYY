@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,6 +13,8 @@ using SpinFourKay.Core.Display;
 using SpinFourKay.Core.Layouts;
 using SpinFourKay.Core.Magpie;
 using SpinFourKay.Core.Orchestration;
+using SpinFourKay.Core.Preferences;
+using SpinFourKay.Core.Updates;
 using SpinFourKay.Core.Windows;
 
 namespace SpinFourKay.SelfTest;
@@ -68,6 +73,24 @@ internal static class Program
         runner.Add(
             "UI layout / rollback and interrupted restore recovery",
             UiLayoutRollbackAndInterruptedRestoreRecoveryAsync);
+        runner.Add(
+            "UI layout / stale session recovered before relaunch",
+            UiLayoutStaleSessionRecoveredBeforeRelaunchAsync);
+        runner.Add(
+            "Preferences / complete atomic round trip",
+            PreferencesAtomicRoundTripAsync);
+        runner.Add(
+            "Preferences / corruption and invalid values use safe defaults",
+            PreferencesCorruptionAndValidationAsync);
+        runner.Add(
+            "Updates / GitHub release discovery and verified staging",
+            UpdateDiscoveryAndVerifiedStagingAsync);
+        runner.Add(
+            "Updates / checksum and archive attacks fail closed",
+            UpdatePackageFailuresAreFailClosedAsync);
+        runner.Add(
+            "Updates / transactional install preserves settings and rolls back",
+            UpdateTransactionalInstallAndRollbackAsync);
         runner.Add("Configuration / atomic fake-client edit", ConfigurationAtomicFakeClientEditAsync);
         runner.Add("Configuration / native UI-scale guard", ConfigurationNativeUiScaleGuardAsync);
         runner.Add("Configuration / missing file and cancellation", ConfigurationErrorPathsAsync);
@@ -1213,6 +1236,568 @@ internal static class Program
             originalEqClient,
             await File.ReadAllBytesAsync(eqClientPath).ConfigureAwait(false));
         Assert.Null(await service.LoadActiveAsync(eqDirectory, stateRoot).ConfigureAwait(false));
+    }
+
+    private static async Task UiLayoutStaleSessionRecoveredBeforeRelaunchAsync()
+    {
+        await using TempDirectory temp = new();
+        string eqDirectory = Path.Combine(temp.Path, "User Selected EQ");
+        string stateRoot = Path.Combine(temp.Path, "Local App State");
+        Directory.CreateDirectory(eqDirectory);
+        string eqClientPath = Path.Combine(eqDirectory, "eqclient.ini");
+        byte[] originalEqClient = Encoding.ASCII.GetBytes(
+            "[Defaults]\r\nUIScale=1\r\n[VideoMode]\r\nWidth=3440\r\n"
+                + "Height=1440\r\nWindowedWidth=1720\r\n"
+                + "WindowedHeight=720\r\nFullscreen=1\r\n");
+        await File.WriteAllBytesAsync(eqClientPath, originalEqClient)
+            .ConfigureAwait(false);
+        string layoutPath = Path.Combine(eqDirectory, "UI_Spin_qeynos_LO1.ini");
+        byte[] originalLayout = Encoding.ASCII.GetBytes(
+            "[Main]\r\nUISkin=custom\r\n[Chat]\r\nXPos=10.000000%\r\n"
+                + "Width=550\r\nHeight=220\r\n");
+        await File.WriteAllBytesAsync(layoutPath, originalLayout)
+            .ConfigureAwait(false);
+
+        UiLayoutProfileService service = new();
+        UiLayoutPrepareRequest request = new()
+        {
+            EqDirectory = eqDirectory,
+            StateRoot = stateRoot,
+            NativeResolution = new PixelSize(3440, 1440),
+            ScaledResolution = new PixelSize(2752, 1152),
+        };
+        UiLayoutPrepareResult interrupted = await service.PrepareAsync(request)
+            .ConfigureAwait(false);
+        InvalidOperationException blocked =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => service.PrepareAsync(request)).ConfigureAwait(false);
+        Assert.Contains("still active", blocked.Message);
+
+        // This mirrors the application pre-launch recovery after it has
+        // positively verified that no eqgame process is running.
+        UiLayoutSessionState? discovered = await service.LoadActiveAsync(
+            eqDirectory,
+            stateRoot).ConfigureAwait(false);
+        Assert.Equal(interrupted.State.SessionId, discovered?.SessionId);
+        _ = await service.CompleteAsync(discovered!).ConfigureAwait(false);
+        Assert.Null(await service.LoadActiveAsync(eqDirectory, stateRoot)
+            .ConfigureAwait(false));
+        Assert.SequenceEqual(
+            originalLayout,
+            await File.ReadAllBytesAsync(layoutPath).ConfigureAwait(false));
+        Assert.SequenceEqual(
+            originalEqClient,
+            await File.ReadAllBytesAsync(eqClientPath).ConfigureAwait(false));
+
+        UiLayoutPrepareResult next = await service.PrepareAsync(request)
+            .ConfigureAwait(false);
+        Assert.Equal(UiLayoutSessionStatus.Active, next.State.Status);
+        await service.RollbackAsync(next.State).ConfigureAwait(false);
+    }
+
+    private static async Task PreferencesAtomicRoundTripAsync()
+    {
+        await using TempDirectory temp = new();
+        string preferencesPath = Path.Combine(
+            temp.Path,
+            "LocalAppData",
+            "SpinFOURKAYYY",
+            "preferences.json");
+        using UserPreferencesStore store = new(preferencesPath);
+        UserPreferences initial = new()
+        {
+            LegendsDirectory = Path.Combine(temp.Path, "My Legends Install"),
+            SpinTextureExecutablePath = Path.Combine(
+                temp.Path,
+                "Tools",
+                "SpinTexture.exe"),
+            TargetDisplayBounds = new PixelRect(-3840, 0, 3840, 2160),
+            UiScaleHundredths = 137,
+            ScalingFilter = ScalingFilter.Fsr,
+            AntiAliasing = AntiAliasingMode.Smaa,
+            ClarityPercent = 15,
+            MaintainTopmostOverlays = false,
+            UiCompatibilityMode = FourKayUiCompatibilityMode.SpinUiStrict,
+            SpinUiPresetIndex = 1,
+        };
+
+        UserPreferencesLoadResult missing = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.False(missing.WasLoaded);
+        Assert.Null(missing.Warning);
+        Assert.Equal(125, missing.Preferences.UiScaleHundredths);
+
+        await store.SaveAsync(initial).ConfigureAwait(false);
+        UserPreferencesLoadResult loaded = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.True(loaded.WasLoaded);
+        Assert.Null(loaded.Warning);
+        Assert.Equal(
+            Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(initial.LegendsDirectory!)),
+            loaded.Preferences.LegendsDirectory);
+        Assert.Equal(
+            Path.GetFullPath(initial.SpinTextureExecutablePath!),
+            loaded.Preferences.SpinTextureExecutablePath);
+        Assert.Equal(initial.TargetDisplayBounds, loaded.Preferences.TargetDisplayBounds);
+        Assert.Equal(137, loaded.Preferences.UiScaleHundredths);
+        Assert.Equal(ScalingFilter.Fsr, loaded.Preferences.ScalingFilter);
+        Assert.Equal(AntiAliasingMode.Smaa, loaded.Preferences.AntiAliasing);
+        Assert.Equal(15, loaded.Preferences.ClarityPercent);
+        Assert.False(loaded.Preferences.MaintainTopmostOverlays);
+        Assert.Equal(
+            FourKayUiCompatibilityMode.SpinUiStrict,
+            loaded.Preferences.UiCompatibilityMode);
+        Assert.Equal(1, loaded.Preferences.SpinUiPresetIndex);
+
+        await store.SaveAsync(initial with
+        {
+            UiScaleHundredths = 110,
+            ScalingFilter = ScalingFilter.Lanczos,
+        }).ConfigureAwait(false);
+        UserPreferencesLoadResult replaced = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.Equal(110, replaced.Preferences.UiScaleHundredths);
+        Assert.Equal(ScalingFilter.Lanczos, replaced.Preferences.ScalingFilter);
+        Assert.Empty(Directory.EnumerateFiles(
+            Path.GetDirectoryName(preferencesPath)!,
+            "*.tmp",
+            SearchOption.TopDirectoryOnly));
+    }
+
+    private static async Task PreferencesCorruptionAndValidationAsync()
+    {
+        await using TempDirectory temp = new();
+        string preferencesPath = Path.Combine(temp.Path, "preferences.json");
+        using UserPreferencesStore store = new(preferencesPath);
+
+        await File.WriteAllTextAsync(preferencesPath, "{not valid json")
+            .ConfigureAwait(false);
+        UserPreferencesLoadResult corrupt = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.False(corrupt.WasLoaded);
+        Assert.True(!string.IsNullOrWhiteSpace(corrupt.Warning));
+        Assert.Equal(125, corrupt.Preferences.UiScaleHundredths);
+        Assert.Equal(ScalingFilter.Nis, corrupt.Preferences.ScalingFilter);
+
+        await File.WriteAllTextAsync(
+            preferencesPath,
+            "{\"formatVersion\":99}").ConfigureAwait(false);
+        UserPreferencesLoadResult future = await store.LoadAsync()
+            .ConfigureAwait(false);
+        Assert.False(future.WasLoaded);
+        Assert.Contains("not supported", future.Warning!);
+
+        await store.SaveAsync(new UserPreferences()).ConfigureAwait(false);
+        byte[] valid = await File.ReadAllBytesAsync(preferencesPath)
+            .ConfigureAwait(false);
+        await Assert.ThrowsAnyAsync<ArgumentOutOfRangeException>(
+            () => store.SaveAsync(new UserPreferences
+            {
+                UiScaleHundredths = 99,
+            })).ConfigureAwait(false);
+        Assert.SequenceEqual(
+            valid,
+            await File.ReadAllBytesAsync(preferencesPath).ConfigureAwait(false));
+        await Assert.ThrowsAnyAsync<InvalidDataException>(
+            () => store.SaveAsync(new UserPreferences
+            {
+                UiCompatibilityMode = FourKayUiCompatibilityMode.UnspecifiedLegacy,
+            })).ConfigureAwait(false);
+    }
+
+    private static async Task UpdateDiscoveryAndVerifiedStagingAsync()
+    {
+        await using TempDirectory temp = new();
+        const string version = "1.0.6";
+        byte[] package = CreateUpdatePackage(
+            version,
+            new Dictionary<string, byte[]>
+            {
+                ["SpinFOURKAYYY.exe"] = Encoding.ASCII.GetBytes("new app"),
+                ["Engine/Magpie/test.dat"] = Encoding.ASCII.GetBytes("engine"),
+                ["README.md"] = Encoding.UTF8.GetBytes("update fixture"),
+            });
+        string packageHash = Convert.ToHexString(SHA256.HashData(package));
+        string packageName = $"SpinFOURKAYYY-{version}-win-x64.zip";
+        byte[] sidecar = Encoding.ASCII.GetBytes(
+            $"{packageHash.ToLowerInvariant()} *{packageName}\n");
+        using RouteHttpMessageHandler handler = CreateUpdateRoutes(
+            version,
+            package,
+            sidecar,
+            packageHash);
+        using HttpClient httpClient = new(handler);
+        using GitHubReleaseUpdateService service = new(
+            Path.Combine(temp.Path, "updates"),
+            httpClient);
+
+        ReleaseUpdateCheck check = await service.CheckAsync(new Version(1, 0, 5))
+            .ConfigureAwait(false);
+        Assert.True(check.IsUpdateAvailable);
+        Assert.Equal(new Version(1, 0, 6), check.LatestRelease.Version);
+        Assert.Equal(packageName, check.LatestRelease.PackageFileName);
+        List<int> progressValues = [];
+        PreparedReleaseUpdate prepared = await service.PrepareAsync(
+            check.LatestRelease,
+            new InlineProgress<int>(progressValues.Add)).ConfigureAwait(false);
+        Assert.Equal(100, progressValues[^1]);
+        Assert.Equal(packageHash, prepared.PackageSha256);
+        Assert.True(File.Exists(Path.Combine(
+            prepared.StagedAppDirectory,
+            "SpinFOURKAYYY.exe")));
+        Assert.True(File.Exists(Path.Combine(
+            prepared.StagedAppDirectory,
+            "Engine",
+            "Magpie",
+            "test.dat")));
+        _ = await ReleasePackageValidator.ValidateStagedAppAsync(
+            prepared.StagedAppDirectory,
+            new Version(1, 0, 6)).ConfigureAwait(false);
+
+        ReleaseUpdateCheck current = await service.CheckAsync(new Version(1, 0, 6))
+            .ConfigureAwait(false);
+        Assert.False(current.IsUpdateAvailable);
+        Assert.Equal(new Version(1, 2, 3),
+            GitHubReleaseUpdateService.NormalizeThreePartVersion(
+                new Version(1, 2, 3, 99)));
+    }
+
+    private static async Task UpdatePackageFailuresAreFailClosedAsync()
+    {
+        await using TempDirectory temp = new();
+        const string version = "1.0.6";
+        byte[] validPackage = CreateUpdatePackage(
+            version,
+            new Dictionary<string, byte[]>
+            {
+                ["SpinFOURKAYYY.exe"] = Encoding.ASCII.GetBytes("app"),
+            });
+        string validHash = Convert.ToHexString(SHA256.HashData(validPackage));
+        string packageName = $"SpinFOURKAYYY-{version}-win-x64.zip";
+        byte[] wrongSidecar = Encoding.ASCII.GetBytes(
+            $"{new string('0', 64)} *{packageName}\n");
+        string checksumRoot = Path.Combine(temp.Path, "checksum-updates");
+        using (RouteHttpMessageHandler handler = CreateUpdateRoutes(
+            version,
+            validPackage,
+            wrongSidecar,
+            validHash))
+        using (HttpClient httpClient = new(handler))
+        using (GitHubReleaseUpdateService service = new(checksumRoot, httpClient))
+        {
+            ReleaseUpdateCheck check = await service.CheckAsync(new Version(1, 0, 5))
+                .ConfigureAwait(false);
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => service.PrepareAsync(check.LatestRelease))
+                .ConfigureAwait(false);
+        }
+
+        Assert.False(Directory.Exists(Path.Combine(checksumRoot, "v1.0.6")));
+
+        byte[] unsafePackage = CreateUpdatePackage(
+            version,
+            new Dictionary<string, byte[]>
+            {
+                ["SpinFOURKAYYY.exe"] = Encoding.ASCII.GetBytes("app"),
+            },
+            unsafeEntry: $"SpinFOURKAYYY-{version}-win-x64/../escape.txt");
+        string unsafeHash = Convert.ToHexString(SHA256.HashData(unsafePackage));
+        byte[] unsafeSidecar = Encoding.ASCII.GetBytes(
+            $"{unsafeHash.ToLowerInvariant()} *{packageName}\n");
+        string unsafeRoot = Path.Combine(temp.Path, "unsafe-updates");
+        using (RouteHttpMessageHandler handler = CreateUpdateRoutes(
+            version,
+            unsafePackage,
+            unsafeSidecar,
+            unsafeHash))
+        using (HttpClient httpClient = new(handler))
+        using (GitHubReleaseUpdateService service = new(unsafeRoot, httpClient))
+        {
+            ReleaseUpdateCheck check = await service.CheckAsync(new Version(1, 0, 5))
+                .ConfigureAwait(false);
+            InvalidDataException failure =
+                await Assert.ThrowsAsync<InvalidDataException>(
+                    () => service.PrepareAsync(check.LatestRelease))
+                    .ConfigureAwait(false);
+            Assert.Contains("unsafe path", failure.Message);
+        }
+
+        Assert.False(File.Exists(Path.Combine(temp.Path, "escape.txt")));
+        Assert.False(Directory.Exists(Path.Combine(unsafeRoot, "v1.0.6")));
+    }
+
+    private static async Task UpdateTransactionalInstallAndRollbackAsync()
+    {
+        await using TempDirectory temp = new();
+        string target = Path.Combine(temp.Path, "Installed App");
+        string requestRoot = Path.Combine(temp.Path, "updates", "v1.0.6");
+        string staged = Path.Combine(
+            requestRoot,
+            "staged",
+            "SpinFOURKAYYY-1.0.6-win-x64");
+        Directory.CreateDirectory(target);
+        Directory.CreateDirectory(staged);
+        byte[] oldExecutable = Encoding.ASCII.GetBytes("old app exact");
+        byte[] oldOwned = Encoding.ASCII.GetBytes("remove on update");
+        byte[] userFile = Encoding.ASCII.GetBytes("never owned");
+        string targetExecutable = Path.Combine(target, "SpinFOURKAYYY.exe");
+        await File.WriteAllBytesAsync(targetExecutable, oldExecutable)
+            .ConfigureAwait(false);
+        await File.WriteAllBytesAsync(Path.Combine(target, "old-owned.txt"), oldOwned)
+            .ConfigureAwait(false);
+        await File.WriteAllBytesAsync(Path.Combine(target, "my-notes.txt"), userFile)
+            .ConfigureAwait(false);
+        ReleasePackageManifest oldManifest = CreateReleaseManifest(
+            "1.0.5",
+            new Dictionary<string, byte[]>
+            {
+                ["SpinFOURKAYYY.exe"] = oldExecutable,
+                ["old-owned.txt"] = oldOwned,
+            });
+        await WriteManifestAsync(target, oldManifest).ConfigureAwait(false);
+        string savedSettings = Path.Combine(temp.Path, "LocalAppData", "preferences.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(savedSettings)!);
+        byte[] settingsBytes = Encoding.UTF8.GetBytes("{\"uiScaleHundredths\":125}");
+        await File.WriteAllBytesAsync(savedSettings, settingsBytes).ConfigureAwait(false);
+
+        byte[] newExecutable = Encoding.ASCII.GetBytes("new app exact");
+        byte[] newOwned = Encoding.ASCII.GetBytes("new feature");
+        Dictionary<string, byte[]> newContent = new()
+        {
+            ["SpinFOURKAYYY.exe"] = newExecutable,
+            ["new-owned.txt"] = newOwned,
+        };
+        ReleasePackageManifest newManifest = CreateReleaseManifest(
+            "1.0.6",
+            newContent);
+        await WriteStagedContentAsync(staged, newContent, newManifest)
+            .ConfigureAwait(false);
+        UpdateApplyRequest request = new()
+        {
+            ExpectedVersion = "1.0.6",
+            PreviousVersion = "1.0.5",
+            PreviousProcessId = Environment.ProcessId,
+            PreviousExecutablePath = targetExecutable,
+            TargetDirectory = target,
+            StagedAppDirectory = staged,
+        };
+
+        UpdateApplyResult applied =
+            await ReleaseUpdateInstaller.ApplyFilesTransactionalAsync(
+                request,
+                newManifest,
+                restartApplication: false).ConfigureAwait(false);
+        Assert.Equal("1.0.6", applied.InstalledVersion);
+        Assert.SequenceEqual(
+            newExecutable,
+            await File.ReadAllBytesAsync(targetExecutable).ConfigureAwait(false));
+        Assert.SequenceEqual(
+            newOwned,
+            await File.ReadAllBytesAsync(Path.Combine(target, "new-owned.txt"))
+                .ConfigureAwait(false));
+        Assert.False(File.Exists(Path.Combine(target, "old-owned.txt")));
+        Assert.SequenceEqual(
+            userFile,
+            await File.ReadAllBytesAsync(Path.Combine(target, "my-notes.txt"))
+                .ConfigureAwait(false));
+        Assert.SequenceEqual(
+            settingsBytes,
+            await File.ReadAllBytesAsync(savedSettings).ConfigureAwait(false));
+        ReleasePackageManifest installedManifest =
+            JsonSerializer.Deserialize<ReleasePackageManifest>(
+                await File.ReadAllBytesAsync(
+                    Path.Combine(target, "release-manifest.json"))
+                    .ConfigureAwait(false))
+            ?? throw new TestFailureException(
+                "The installed release manifest was empty.");
+        Assert.Equal("1.0.6", installedManifest.Version);
+        Assert.Equal(2, installedManifest.Files.Count);
+
+        // A post-copy hash failure must restore the exact installed version,
+        // including stale owned files, while leaving user/settings files alone.
+        string rollbackTarget = Path.Combine(temp.Path, "Rollback App");
+        string rollbackStaged = Path.Combine(
+            temp.Path,
+            "updates",
+            "v1.0.7",
+            "staged",
+            "SpinFOURKAYYY-1.0.7-win-x64");
+        Directory.CreateDirectory(rollbackTarget);
+        Directory.CreateDirectory(rollbackStaged);
+        string rollbackExecutable = Path.Combine(
+            rollbackTarget,
+            "SpinFOURKAYYY.exe");
+        await File.WriteAllBytesAsync(rollbackExecutable, oldExecutable)
+            .ConfigureAwait(false);
+        await File.WriteAllBytesAsync(
+            Path.Combine(rollbackTarget, "old-owned.txt"),
+            oldOwned).ConfigureAwait(false);
+        await File.WriteAllBytesAsync(
+            Path.Combine(rollbackTarget, "my-notes.txt"),
+            userFile).ConfigureAwait(false);
+        await WriteManifestAsync(rollbackTarget, oldManifest).ConfigureAwait(false);
+        await WriteStagedContentAsync(rollbackStaged, newContent, newManifest)
+            .ConfigureAwait(false);
+        ReleasePackageManifest badManifest = newManifest with
+        {
+            Version = "1.0.7",
+            Files = newManifest.Files.Select(file =>
+                string.Equals(file.Path, "new-owned.txt", StringComparison.Ordinal)
+                    ? file with { Sha256 = new string('F', 64) }
+                    : file).ToArray(),
+        };
+        await WriteManifestAsync(rollbackStaged, badManifest).ConfigureAwait(false);
+        UpdateApplyRequest rollbackRequest = request with
+        {
+            ExpectedVersion = "1.0.7",
+            PreviousExecutablePath = rollbackExecutable,
+            TargetDirectory = rollbackTarget,
+            StagedAppDirectory = rollbackStaged,
+        };
+        InvalidOperationException rollbackFailure =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => ReleaseUpdateInstaller.ApplyFilesTransactionalAsync(
+                    rollbackRequest,
+                    badManifest,
+                    restartApplication: false)).ConfigureAwait(false);
+        Assert.Contains("every replaced app file was restored", rollbackFailure.Message);
+        Assert.SequenceEqual(
+            oldExecutable,
+            await File.ReadAllBytesAsync(rollbackExecutable).ConfigureAwait(false));
+        Assert.SequenceEqual(
+            oldOwned,
+            await File.ReadAllBytesAsync(
+                Path.Combine(rollbackTarget, "old-owned.txt")).ConfigureAwait(false));
+        Assert.False(File.Exists(Path.Combine(rollbackTarget, "new-owned.txt")));
+        Assert.SequenceEqual(
+            userFile,
+            await File.ReadAllBytesAsync(
+                Path.Combine(rollbackTarget, "my-notes.txt")).ConfigureAwait(false));
+    }
+
+    private static RouteHttpMessageHandler CreateUpdateRoutes(
+        string version,
+        byte[] package,
+        byte[] sidecar,
+        string packageHash)
+    {
+        string packageName = $"SpinFOURKAYYY-{version}-win-x64.zip";
+        string packageUrl =
+            $"https://github.com/itsspin/SPINFOURKAYYY/releases/download/v{version}/{packageName}";
+        string sidecarUrl = packageUrl + ".sha256";
+        string releaseJson = JsonSerializer.Serialize(new
+        {
+            tag_name = "v" + version,
+            html_url =
+                $"https://github.com/itsspin/SPINFOURKAYYY/releases/tag/v{version}",
+            draft = false,
+            prerelease = false,
+            assets = new object[]
+            {
+                new
+                {
+                    name = packageName,
+                    size = package.LongLength,
+                    digest = "sha256:" + packageHash.ToLowerInvariant(),
+                    browser_download_url = packageUrl,
+                },
+                new
+                {
+                    name = packageName + ".sha256",
+                    size = sidecar.LongLength,
+                    digest = "sha256:" + Convert.ToHexString(
+                        SHA256.HashData(sidecar)).ToLowerInvariant(),
+                    browser_download_url = sidecarUrl,
+                },
+            },
+        });
+        return new RouteHttpMessageHandler(new Dictionary<string, byte[]>
+        {
+            ["https://api.github.com/repos/itsspin/SPINFOURKAYYY/releases/latest"] =
+                Encoding.UTF8.GetBytes(releaseJson),
+            [packageUrl] = package,
+            [sidecarUrl] = sidecar,
+        });
+    }
+
+    private static byte[] CreateUpdatePackage(
+        string version,
+        IReadOnlyDictionary<string, byte[]> files,
+        string? unsafeEntry = null)
+    {
+        string root = $"SpinFOURKAYYY-{version}-win-x64";
+        ReleasePackageManifest manifest = CreateReleaseManifest(version, files);
+        using MemoryStream output = new();
+        using (ZipArchive archive = new(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach ((string relative, byte[] content) in files)
+            {
+                ZipArchiveEntry entry = archive.CreateEntry(
+                    root + "/" + relative.Replace('\\', '/'));
+                using Stream stream = entry.Open();
+                stream.Write(content);
+            }
+
+            ZipArchiveEntry manifestEntry = archive.CreateEntry(
+                root + "/release-manifest.json");
+            using (Stream stream = manifestEntry.Open())
+            {
+                JsonSerializer.Serialize(stream, manifest);
+            }
+
+            if (unsafeEntry is not null)
+            {
+                ZipArchiveEntry unsafeZipEntry = archive.CreateEntry(unsafeEntry);
+                using Stream stream = unsafeZipEntry.Open();
+                stream.Write(Encoding.ASCII.GetBytes("unsafe"));
+            }
+        }
+
+        return output.ToArray();
+    }
+
+    private static ReleasePackageManifest CreateReleaseManifest(
+        string version,
+        IReadOnlyDictionary<string, byte[]> files) =>
+        new()
+        {
+            Product = "SpinFOURKAYYY",
+            Version = version,
+            Runtime = "win-x64",
+            Files = files.Select(pair => new ReleasePackageFile
+            {
+                Path = pair.Key.Replace('\\', '/'),
+                Size = pair.Value.LongLength,
+                Sha256 = Convert.ToHexString(SHA256.HashData(pair.Value)),
+            }).ToArray(),
+        };
+
+    private static async Task WriteStagedContentAsync(
+        string stagedDirectory,
+        IReadOnlyDictionary<string, byte[]> files,
+        ReleasePackageManifest manifest)
+    {
+        foreach ((string relative, byte[] content) in files)
+        {
+            string path = Path.Combine(
+                stagedDirectory,
+                relative.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllBytesAsync(path, content).ConfigureAwait(false);
+        }
+
+        await WriteManifestAsync(stagedDirectory, manifest).ConfigureAwait(false);
+    }
+
+    private static Task WriteManifestAsync(
+        string directory,
+        ReleasePackageManifest manifest)
+    {
+        Directory.CreateDirectory(directory);
+        return File.WriteAllBytesAsync(
+            Path.Combine(directory, "release-manifest.json"),
+            JsonSerializer.SerializeToUtf8Bytes(manifest));
     }
 
     private static async Task ConfigurationAtomicFakeClientEditAsync()
@@ -5149,6 +5734,24 @@ internal static class Program
                     Status = FourKayJournalStatus.Committed,
                     KeepPreparedConfiguration = true,
                 })]);
+        MethodInfo getMagpieLauncherPath = typeof(FourKayLaunchService).GetMethod(
+            "GetMagpieLauncherPath",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new TestFailureException(
+                "The Magpie launcher-path policy is unavailable.");
+        FourKayLaunchRequest enhancedRequest = CreateLaunchRequest(prepared) with
+        {
+            StartMode = FourKayGameStartMode.SpinTextureEnhanced,
+            LauncherPath = Path.Combine(temp.Path, "SpinTexture.exe"),
+            LauncherArguments = ["--play-enhanced", prepared.EqDirectory],
+        };
+        _ = validateLaunchRequest.Invoke(null, [enhancedRequest]);
+        Assert.Null(getMagpieLauncherPath.Invoke(null, [enhancedRequest]));
+        Assert.Equal(
+            CreateLaunchRequest(prepared).LauncherPath,
+            getMagpieLauncherPath.Invoke(
+                null,
+                [CreateLaunchRequest(prepared)]));
 
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => service.LaunchAndScaleAsync(null!)).ConfigureAwait(false);
@@ -5171,6 +5774,35 @@ internal static class Program
             () => service.LaunchAndScaleAsync(
                 CreateLaunchRequest(prepared) with { MagpieDirectory = " " }))
             .ConfigureAwait(false);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => service.LaunchAndScaleAsync(
+                CreateLaunchRequest(prepared) with
+                {
+                    StartMode = (FourKayGameStartMode)999,
+                })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(
+                CreateLaunchRequest(prepared) with
+                {
+                    LauncherArguments = ["patchme"],
+                })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(enhancedRequest with
+            {
+                LauncherPath = Path.Combine(temp.Path, "UnknownTool.exe"),
+            })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(enhancedRequest with
+            {
+                LauncherArguments =
+                ["--play-enhanced", prepared.EqDirectory, "ticket"],
+            })).ConfigureAwait(false);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => service.LaunchAndScaleAsync(enhancedRequest with
+            {
+                LauncherArguments =
+                ["--play-enhanced", Path.Combine(temp.Path, "Other EQ")],
+            })).ConfigureAwait(false);
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => service.LaunchAndScaleAsync(
                 CreateLaunchRequest(prepared) with { GameStartTimeout = TimeSpan.Zero }))
@@ -5358,12 +5990,7 @@ internal static class Program
                     CreateLaunchRequest(prepared with
                     {
                         EqGamePath = otherClient.EqGamePath,
-                    }) with
-                    {
-                        LauncherPath = Path.Combine(
-                            otherClient.EqDirectory,
-                            "LaunchPad.exe"),
-                    })).ConfigureAwait(false);
+                    }))).ConfigureAwait(false);
         Assert.Contains("same selected EverQuest Legends", crossClient.Message);
         Assert.Equal(0, launchProcesses.FindCalls);
         Assert.Equal(0, launchConfig.WriteCalls);
@@ -8693,7 +9320,7 @@ internal static class Program
         return new FourKayLaunchRequest
         {
             PreparedState = state,
-            LauncherPath = "LaunchPad.exe",
+            LauncherPath = Path.Combine(state.EqDirectory, "LaunchPad.exe"),
             MagpieDirectory = "Magpie",
             GameStartTimeout = TimeSpan.FromSeconds(1),
             WindowTimeout = TimeSpan.FromSeconds(1),
@@ -9805,6 +10432,37 @@ internal sealed class FakeMagpiePortableConfigService : IMagpiePortableConfigSer
         return await ApplyTransactionAsync(transaction, cancellationToken)
             .ConfigureAwait(false);
     }
+}
+
+internal sealed class RouteHttpMessageHandler(
+    IReadOnlyDictionary<string, byte[]> routes) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string? requestUri = request.RequestUri?.AbsoluteUri;
+        if (requestUri is not null && routes.TryGetValue(requestUri, out byte[]? body))
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(body),
+                RequestMessage = request,
+            });
+        }
+
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("No deterministic test route exists."),
+            RequestMessage = request,
+        });
+    }
+}
+
+internal sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+{
+    public void Report(T value) => report(value);
 }
 
 internal sealed class FakeMagpieProcessService : IMagpieProcessService

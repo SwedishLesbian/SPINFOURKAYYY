@@ -44,6 +44,44 @@ internal static class PathLocator
             && File.Exists(Path.Combine(fullPath, "eqclient.ini"));
     }
 
+    public static string? FindSpinTextureExecutable()
+    {
+        foreach (string candidate in EnumerateSpinTextureCandidates())
+        {
+            if (IsSpinTextureExecutable(candidate))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+
+        return null;
+    }
+
+    public static bool IsSpinTextureExecutable(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            return string.Equals(
+                    Path.GetFileName(fullPath),
+                    "SpinTexture.exe",
+                    StringComparison.OrdinalIgnoreCase)
+                && File.Exists(fullPath);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or NotSupportedException
+            or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
     public static string FindMagpieDirectory()
     {
         string appVersion = typeof(PathLocator).Assembly.GetName().Version
@@ -98,6 +136,11 @@ internal static class PathLocator
     public static string LayoutProfileRoot =>
         Path.Combine(StateRoot, "layout-profiles");
 
+    public static string PreferencesPath =>
+        Path.Combine(StateRoot, "preferences.json");
+
+    public static string UpdateRoot => Path.Combine(StateRoot, "updates");
+
     private static IEnumerable<string> EnumerateLegendsCandidates()
     {
         yield return Environment.CurrentDirectory;
@@ -125,5 +168,27 @@ internal static class PathLocator
                 "Magpie-v0.12.1-x64");
             directory = directory.Parent;
         }
+    }
+
+    private static IEnumerable<string> EnumerateSpinTextureCandidates()
+    {
+        yield return Path.Combine(AppContext.BaseDirectory, "SpinTexture.exe");
+
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        for (int depth = 0; directory is not null && depth < 6; depth++)
+        {
+            yield return Path.Combine(directory.FullName, "SpinTexture.exe");
+            yield return Path.Combine(
+                directory.FullName,
+                "SpinTexture",
+                "SpinTexture.exe");
+            directory = directory.Parent;
+        }
+
+        string localPrograms = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs");
+        yield return Path.Combine(localPrograms, "SpinTexture", "SpinTexture.exe");
+        yield return Path.Combine(localPrograms, "spintexture", "SpinTexture.exe");
     }
 }

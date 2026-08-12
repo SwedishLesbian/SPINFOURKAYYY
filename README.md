@@ -10,8 +10,12 @@
 
 <p align="center">
   <a href="https://github.com/itsspin/SPINFOURKAYYY/releases/latest"><strong>Download the latest release</strong></a>
-  &nbsp;·&nbsp;
+  &nbsp;&middot;&nbsp;
+  <a href="https://itsspin.github.io/spintexture/"><strong>Improve textures with SpinTexture</strong></a>
+  &nbsp;&middot;&nbsp;
   <a href="https://github.com/itsspin/spinips"><strong>Try SpinUI</strong></a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/itsspin/spinips#spins-loremaster"><strong>Try Spin's Loremaster</strong></a>
 </p>
 
 SpinFOURKAYYY makes the complete EverQuest Legends interface easier to read on 4K, ultrawide, and other high-resolution monitors. Choose the size that feels right, launch EverQuest normally, and the app prepares your personal UI layout for you.
@@ -21,12 +25,14 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 ## What it does
 
 - Offers every UI size from **100% to 200%** in simple 1% steps.
+- Remembers your Legends folder, monitor, size, quality, and overlay choices.
 - Automatically fits your existing layout to the size you choose.
 - Remembers layout changes separately for each size.
 - Restores your native layout when EverQuest exits.
 - Keeps supported DPS meters and companion overlays above the scaled game.
 - Includes readable presets for a quick, good-looking setup.
 - Uses safe backups and recovery if the game, app, or Windows closes unexpectedly.
+- Checks completed GitHub Releases and can verify, install, and reopen updates for you.
 - Runs alongside EverQuest without injecting into or modifying the game.
 
 ## Quick start
@@ -38,6 +44,20 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 5. Keep SpinFOURKAYYY open while playing and exit EverQuest normally when finished.
 
 Your first launch at a new size may take a moment while the app prepares a matching copy of your current layout. After that, you can play normally and move windows or edit hotbars as usual. Those layout changes are saved for that size when the game closes.
+
+The next time you open SpinFOURKAYYY, your last setup is ready to use again.
+
+## Automatic updates
+
+SpinFOURKAYYY checks the latest completed GitHub Release when it opens. When a newer stable version is available, the app clearly offers to download and safely verify it before anything closes.
+
+Choose **Install update** after EverQuest is closed. SpinFOURKAYYY keeps your saved settings in place, replaces only files owned by the app, reopens the new version automatically, and confirms the installed version. You can also use **Check updates** in the top-right corner at any time.
+
+## Play with SpinTexture
+
+If you use [SpinTexture](https://itsspin.github.io/spintexture/), install and verify your enhanced texture pack there first. Then click **Play Enhanced EQ** in SpinFOURKAYYY and choose `SpinTexture.exe` the first time. The app remembers that location, asks SpinTexture to verify the installed pack, starts EverQuest without LaunchPad replacing it, and applies your normal SpinFOURKAYYY layout and scaling choices.
+
+Use **Start EverQuest for me** whenever the game needs an update. After updating, reinstall or verify the enhanced pack in SpinTexture before using **Play Enhanced EQ** again. The enhanced flow never reads or reuses account credentials; sign-in behavior may differ from the normal launcher.
 
 ## Choosing a size
 
@@ -63,13 +83,13 @@ Supported overlays can open before or after scaling starts. Run the overlay, Eve
 If EQ Legends Companion is set to hide overlays when the game loses focus, turn that option off while using fullscreen scaling.
 SpinFOURKAYYY also leaves Companion's own lock and click-through controls in charge, so lock a panel when you are not editing it.
 
-## Try SpinUI
+## More from Spin
 
-SpinFOURKAYYY works with any EverQuest UI, but it pairs especially well with **SpinUI**—our complete EverQuest Legends interface overhaul with matching layouts and useful companion tools.
+- **[SpinTexture](https://itsspin.github.io/spintexture/)** improves EverQuest Legends world textures while preserving the game's classic look.
+- **[SpinUI](https://github.com/itsspin/spinips)** is a complete EverQuest Legends interface overhaul with matching layouts for different resolutions.
+- **[Spin's Loremaster](https://github.com/itsspin/spinips#spins-loremaster)** is a live encounter, progression, loot, travel, and adventure companion included with the SpinUI project.
 
-### [Visit the SpinUI GitHub repository →](https://github.com/itsspin/spinips)
-
-SpinUI is completely optional. Select **Current/default/custom UI** in SpinFOURKAYYY if you want to keep using your existing interface.
+All three are optional. SpinFOURKAYYY still works with the default interface, custom UIs, and your existing textures. Select **Current/default/custom UI** if you do not use SpinUI.
 
 ## Helpful notes
 
@@ -95,6 +115,8 @@ Developers need Windows x64, the .NET 9 SDK, PowerShell, Git, and internet acces
 ```powershell
 .\build.ps1
 ```
+
+For a release package with a specific semantic version, use `./build.ps1 -Version 1.0.6`. The GitHub **Release** workflow also accepts either `1.0.6` or `v1.0.6` and applies that version automatically; editing the project file first is not required.
 
 ## License and trademarks
 

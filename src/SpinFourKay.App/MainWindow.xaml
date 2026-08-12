@@ -56,16 +56,28 @@
                                Foreground="{StaticResource MutedTextBrush}"
                                Text="Readable EverQuest - simple 1% sizing for any UI" />
                 </StackPanel>
-                <Button Grid.Column="2"
-                        MinHeight="40"
-                        Padding="13,7"
-                        VerticalAlignment="Center"
-                        AutomationProperties.Name="Open SpinUI GitHub repository"
-                        AutomationProperties.HelpText="Opens the optional SpinUI repository in your default browser."
-                        ToolTip="Open the optional SpinUI project"
-                        Style="{StaticResource QuietButton}"
-                        Click="OpenSpinUi_Click"
-                        Content="SpinUI GitHub" />
+                <StackPanel Grid.Column="2"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal">
+                    <Button x:Name="CheckUpdatesButton"
+                            MinHeight="40"
+                            Margin="0,0,7,0"
+                            Padding="13,7"
+                            AutomationProperties.Name="Check for SpinFOURKAYYY updates"
+                            AutomationProperties.HelpText="Checks the latest completed GitHub Release for a newer verified SpinFOURKAYYY package."
+                            ToolTip="Check the latest completed GitHub Release"
+                            Style="{StaticResource QuietButton}"
+                            Click="CheckUpdates_Click"
+                            Content="Check updates" />
+                    <Button MinHeight="40"
+                            Padding="13,7"
+                            AutomationProperties.Name="Open SpinUI GitHub repository"
+                            AutomationProperties.HelpText="Opens the optional SpinUI repository in your default browser."
+                            ToolTip="Open the optional SpinUI project"
+                            Style="{StaticResource QuietButton}"
+                            Click="OpenSpinUi_Click"
+                            Content="SpinUI GitHub" />
+                </StackPanel>
             </Grid>
         </Border>
 
@@ -75,6 +87,46 @@
                 <StackPanel MaxWidth="860"
                             Margin="20,12,20,16"
                             HorizontalAlignment="Center">
+                    <Border x:Name="UpdateAvailableBorder"
+                            Margin="0,0,0,9"
+                            Padding="12,10"
+                            Visibility="Collapsed"
+                            Background="#11231E"
+                            BorderBrush="#2D775F"
+                            BorderThickness="1"
+                            CornerRadius="10">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock x:Name="UpdateAvailableTitleText"
+                                           FontSize="13"
+                                           FontWeight="Bold"
+                                           Foreground="{StaticResource SuccessBrush}"
+                                           Text="A new SpinFOURKAYYY update is ready" />
+                                <TextBlock x:Name="UpdateAvailableDetailText"
+                                           Margin="0,1,12,0"
+                                           FontSize="11"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           TextWrapping="Wrap"
+                                           Text="Install the verified GitHub Release, keep your settings, and reopen automatically." />
+                            </StackPanel>
+                            <Button x:Name="InstallUpdateButton"
+                                    Grid.Column="1"
+                                    MinWidth="128"
+                                    MinHeight="44"
+                                    Padding="13,7"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="Install the available SpinFOURKAYYY update"
+                                    AutomationProperties.HelpText="Downloads and verifies the GitHub Release, closes SpinFOURKAYYY, replaces app-owned files, keeps saved settings, and reopens the new version."
+                                    Style="{StaticResource PrimaryButton}"
+                                    Click="InstallUpdate_Click"
+                                    Content="Install update" />
+                        </Grid>
+                    </Border>
+
                     <Border x:Name="RecoveryGateBorder"
                             Margin="0,0,0,9"
                             Padding="12,10"
@@ -435,10 +487,12 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="10" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="10" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <Button x:Name="AttachButton"
-                                Grid.Column="2"
+                                Grid.Column="4"
                                 MinWidth="190"
                                 MinHeight="48"
                                 AutomationProperties.Name="Stop active fullscreen scaling"
@@ -456,7 +510,24 @@
                                 Style="{StaticResource PrimaryButton}"
                                 Click="PrepareAndLaunch_Click"
                                 Content="Start EverQuest for me" />
+                        <Button x:Name="PlayEnhancedButton"
+                                Grid.Column="2"
+                                MinHeight="52"
+                                AutomationProperties.Name="Play Enhanced EverQuest with SpinTexture"
+                                AutomationProperties.HelpText="Uses SpinTexture to verify the installed enhanced texture pack, bypasses LaunchPad, and applies the selected SpinFOURKAYYY scaling safely."
+                                IsEnabled="False"
+                                Style="{StaticResource SecondaryButton}"
+                                Click="PlayEnhanced_Click"
+                                Content="Play Enhanced EQ" />
                     </Grid>
+
+                    <TextBlock Margin="4,6,4,0"
+                               HorizontalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="11"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               Text="SpinTexture installed? Play Enhanced EQ verifies that pack and skips LaunchPad. Use the normal start button whenever the game needs an update." />
 
                     <Expander x:Name="AdvancedExpander"
                               Margin="0,9,0,0"
@@ -704,7 +775,8 @@
                                                Text="Anti-aliasing" />
                                     <ComboBox x:Name="AntiAliasingComboBox"
                                               AutomationProperties.Name="Whole-frame anti-aliasing mode"
-                                              AutomationProperties.HelpText="Optional post-process smoothing for jagged edges. It can also soften small UI text.">
+                                              AutomationProperties.HelpText="Optional post-process smoothing for jagged edges. It can also soften small UI text."
+                                              SelectionChanged="PreferenceSelector_SelectionChanged">
                                         <ComboBoxItem IsSelected="True"
                                                       Tag="Off"
                                                       Content="Off · sharpest UI text" />
@@ -749,6 +821,8 @@
                                               VerticalAlignment="Center"
                                               IsChecked="True"
                                               FontWeight="SemiBold"
+                                              Checked="PreferenceToggle_Changed"
+                                              Unchecked="PreferenceToggle_Changed"
                                               AutomationProperties.Name="Keep companion overlays visible"
                                               AutomationProperties.HelpText="Keeps existing always-on-top companion windows above the verified fullscreen output without resizing their pixels.">
                                         <TextBlock Text="Keep visible · recommended" />

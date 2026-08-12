@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net.Http;
+using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation.Peers;
@@ -15,6 +17,8 @@ using SpinFourKay.Core.Display;
 using SpinFourKay.Core.Layouts;
 using SpinFourKay.Core.Magpie;
 using SpinFourKay.Core.Orchestration;
+using SpinFourKay.Core.Preferences;
+using SpinFourKay.Core.Updates;
 using SpinFourKay.Core.Windows;
 
 namespace SpinFourKay.App;
@@ -22,6 +26,7 @@ namespace SpinFourKay.App;
 public partial class MainWindow : Window, IDisposable
 {
     private static readonly TimeSpan FullscreenResumeGrace = TimeSpan.FromSeconds(8);
+    private static readonly Version CurrentAppVersion = GetCurrentAppVersion();
 
     private readonly ResolutionPlanner _resolutionPlanner = new();
     private readonly SpinUiResolutionPlanner _spinUiResolutionPlanner = new();
@@ -43,6 +48,11 @@ public partial class MainWindow : Window, IDisposable
     private readonly DispatcherTimer _overlayCompatibilityTimer;
     private readonly DispatcherTimer _liveScaleDebounceTimer;
     private readonly DispatcherTimer _clarityDebounceTimer;
+    private readonly DispatcherTimer _preferencesSaveTimer;
+    private readonly UserPreferencesStore _preferencesStore = new(
+        PathLocator.PreferencesPath);
+    private readonly GitHubReleaseUpdateService _updateService = new(
+        PathLocator.UpdateRoot);
     private bool _clarityReapplyPending;
     private int _overlayCompatibilityTickCount;
     private int _displayedOverlayWarningCount;
@@ -71,6 +81,15 @@ public partial class MainWindow : Window, IDisposable
     private bool _allowCloseAfterCleanup;
     private bool _isUpdatingPresetCards;
     private bool _startupRunningGameDetectionAttempted;
+    private bool _preferencesReady;
+    private string? _lastValidLegendsDirectory;
+    private string? _spinTextureExecutablePath;
+    private int _lastSpinUiPresetIndex = 2;
+    private ReleaseUpdateInfo? _availableUpdate;
+    private bool _isCheckingForUpdates;
+    private bool _isInstallingUpdate;
+    private bool _closeRequestedDuringUpdate;
+    private CancellationTokenSource? _updateCancellation;
     private FineUiScale? _pendingLiveScale;
     private int _activeRecoveryCount;
     private ScalingSessionSupervisionState _scalingSupervisionState =
@@ -124,6 +143,11 @@ public partial class MainWindow : Window, IDisposable
             Interval = TimeSpan.FromMilliseconds(800),
         };
         _clarityDebounceTimer.Tick += ClarityDebounceTimer_Tick;
+        _preferencesSaveTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(600),
+        };
+        _preferencesSaveTimer.Tick += PreferencesSaveTimer_Tick;
         Loaded += MainWindow_Loaded;
         LocationChanged += MainWindow_LocationChanged;
         Closed += MainWindow_Closed;
@@ -134,13 +158,33 @@ public partial class MainWindow : Window, IDisposable
         _ = sender;
         _ = e;
 
-        string? legendsDirectory = PathLocator.FindLegendsDirectory();
+        UserPreferencesLoadResult saved =
+            await _preferencesStore.LoadAsync(CancellationToken.None)
+                .ConfigureAwait(true);
+        if (saved.Warning is not null)
+        {
+            Debug.WriteLine("SpinFOURKAYYY settings fallback: " + saved.Warning);
+        }
+
+        UserPreferences preferences = saved.Preferences;
+        _spinTextureExecutablePath =
+            PathLocator.IsSpinTextureExecutable(
+                preferences.SpinTextureExecutablePath)
+                ? Path.GetFullPath(preferences.SpinTextureExecutablePath!)
+                : PathLocator.FindSpinTextureExecutable();
+        string? legendsDirectory =
+            PathLocator.IsLegendsDirectory(preferences.LegendsDirectory)
+                ? Path.GetFullPath(preferences.LegendsDirectory!)
+                : PathLocator.FindLegendsDirectory();
         if (legendsDirectory is not null)
         {
             LegendsPathTextBox.Text = legendsDirectory;
+            _lastValidLegendsDirectory = legendsDirectory;
         }
 
-        PopulateDisplays();
+        PopulateDisplays(preferences.TargetDisplayBounds);
+        ApplySavedPreferences(preferences);
+        _preferencesReady = true;
         RefreshDisplayAndPlan();
         await LoadRecoveryStateAsync().ConfigureAwait(true);
         await LoadScaleAwareLayoutStateAsync().ConfigureAwait(true);
@@ -149,6 +193,28 @@ public partial class MainWindow : Window, IDisposable
         _overlayCompatibilityTimer.Start();
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         DetectRunningGameAtStartup();
+        QueuePreferencesSave();
+        if (App.UpdatedFromVersion is { } previousVersion)
+        {
+            string currentVersion = CurrentAppVersion.ToString(3);
+            SetStatus(
+                StatusTone.Ready,
+                $"UPDATED TO {currentVersion}",
+                $"SpinFOURKAYYY updated from {previousVersion}. Your saved folder, "
+                    + "display, scaling, quality, UI, overlay, and SpinTexture "
+                    + "choices were kept.");
+            _ = MessageBox.Show(
+                this,
+                $"SpinFOURKAYYY updated successfully to {currentVersion}.\n\n"
+                    + "Your saved settings were kept and are ready to use.",
+                "SpinFOURKAYYY is up to date",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
+        await CheckForUpdatesAsync(
+            showCurrentVersionMessage: false,
+            offerInstall: App.UpdatedFromVersion is null).ConfigureAwait(true);
     }
 
     private void DetectRunningGameAtStartup()
@@ -591,6 +657,12 @@ public partial class MainWindow : Window, IDisposable
             return;
         }
 
+        if (PathLocator.IsLegendsDirectory(LegendsPathTextBox.Text))
+        {
+            _lastValidLegendsDirectory = Path.GetFullPath(
+                LegendsPathTextBox.Text.Trim());
+        }
+
         RefreshSpinUiDetection();
         if (IsLoaded)
         {
@@ -600,6 +672,8 @@ public partial class MainWindow : Window, IDisposable
         {
             RefreshActionAvailability();
         }
+
+        QueuePreferencesSave();
     }
 
     private void Preset_Checked(object sender, RoutedEventArgs e)
@@ -609,6 +683,12 @@ public partial class MainWindow : Window, IDisposable
 
         if (IsLoaded && !_isUpdatingPresetCards)
         {
+            int selectedCardIndex = SelectedPresetCardIndex();
+            if (UsesStrictSpinUiMode && selectedCardIndex >= 0)
+            {
+                _lastSpinUiPresetIndex = selectedCardIndex;
+            }
+
             if (!UsesStrictSpinUiMode)
             {
                 _isUpdatingPresetCards = true;
@@ -628,7 +708,48 @@ public partial class MainWindow : Window, IDisposable
             {
                 SetStatus(StatusTone.Info, "FILTER ADJUSTED", filterNotice);
             }
+
+            QueuePreferencesSave();
         }
+    }
+
+    private string? ResolveSpinTextureExecutablePath()
+    {
+        if (PathLocator.IsSpinTextureExecutable(_spinTextureExecutablePath))
+        {
+            return Path.GetFullPath(_spinTextureExecutablePath!);
+        }
+
+        string? detected = PathLocator.FindSpinTextureExecutable();
+        if (detected is not null)
+        {
+            return detected;
+        }
+
+        OpenFileDialog dialog = new()
+        {
+            Title = "Choose SpinTexture.exe",
+            Filter = "SpinTexture application (SpinTexture.exe)|SpinTexture.exe",
+            FileName = "SpinTexture.exe",
+            CheckFileExists = true,
+            Multiselect = false,
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return null;
+        }
+
+        if (!PathLocator.IsSpinTextureExecutable(dialog.FileName))
+        {
+            ShowError(
+                "SpinTexture was not selected",
+                "Choose the real SpinTexture.exe from its fully extracted folder. "
+                    + "SpinFOURKAYYY will only use SpinTexture's verified Enhanced "
+                    + "EQ launch flow.");
+            return null;
+        }
+
+        return Path.GetFullPath(dialog.FileName);
     }
 
     private void FineScaleSlider_ValueChanged(
@@ -660,6 +781,7 @@ public partial class MainWindow : Window, IDisposable
             SetStatus(StatusTone.Info, "FILTER ADJUSTED", filterNotice);
         }
 
+        QueuePreferencesSave();
     }
 
     /// <summary>
@@ -751,6 +873,7 @@ public partial class MainWindow : Window, IDisposable
 
         // Clarity is a launch setting. The control is disabled while a managed
         // session is active so the running game window is never re-attached.
+        QueuePreferencesSave();
     }
 
     private async void ClarityDebounceTimer_Tick(object? sender, EventArgs e)
@@ -807,7 +930,24 @@ public partial class MainWindow : Window, IDisposable
         if (IsLoaded)
         {
             RefreshDisplayAndPlan();
+            QueuePreferencesSave();
         }
+    }
+
+    private void PreferenceSelector_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        QueuePreferencesSave();
+    }
+
+    private void PreferenceToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        QueuePreferencesSave();
     }
 
     private void QualityComboBox_SelectionChanged(
@@ -832,6 +972,8 @@ public partial class MainWindow : Window, IDisposable
             {
                 SetStatus(StatusTone.Info, "FILTER ADJUSTED", filterNotice);
             }
+
+            QueuePreferencesSave();
         }
     }
 
@@ -861,6 +1003,8 @@ public partial class MainWindow : Window, IDisposable
         {
             SetRecoveryStatus();
         }
+
+        QueuePreferencesSave();
     }
 
     private void SpinUiLayoutReady_Checked(object sender, RoutedEventArgs e)
@@ -969,7 +1113,33 @@ public partial class MainWindow : Window, IDisposable
             "PREPARING AND STARTING EVERQUEST",
             "Saving the selected source resolution, then opening the normal "
                 + "Legends launcher…",
-            LaunchThenAutoScaleCoreAsync).ConfigureAwait(true);
+            token => LaunchThenAutoScaleCoreAsync(
+                FourKayGameStartMode.OfficialLauncher,
+                launchTargetPath: null,
+                token)).ConfigureAwait(true);
+    }
+
+    private async void PlayEnhanced_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+
+        string? spinTexturePath = ResolveSpinTextureExecutablePath();
+        if (spinTexturePath is null)
+        {
+            return;
+        }
+
+        _spinTextureExecutablePath = spinTexturePath;
+        QueuePreferencesSave();
+        await RunOperationAsync(
+            "PREPARING ENHANCED EVERQUEST",
+            "Preparing the selected UI size, then asking SpinTexture to verify "
+                + "and play the installed enhanced pack…",
+            token => LaunchThenAutoScaleCoreAsync(
+                FourKayGameStartMode.SpinTextureEnhanced,
+                spinTexturePath,
+                token)).ConfigureAwait(true);
     }
 
     private async void Attach_Click(object sender, RoutedEventArgs e)
@@ -1096,6 +1266,19 @@ public partial class MainWindow : Window, IDisposable
             return;
         }
 
+        if (_isCheckingForUpdates || _isInstallingUpdate)
+        {
+            _closeRequestedDuringUpdate = true;
+            _updateCancellation?.Cancel();
+            SetStatus(
+                StatusTone.Working,
+                "FINISHING UPDATE ACTIVITY",
+                "Cancelling the current download or update check safely, then closing.");
+            return;
+        }
+
+        _preferencesSaveTimer.Stop();
+        await SavePreferencesSafelyAsync().ConfigureAwait(true);
         _isCloseCleanupRunning = true;
         _scalingHealthTimer.Stop();
         _overlayCompatibilityTimer.Stop();
@@ -1191,6 +1374,10 @@ public partial class MainWindow : Window, IDisposable
         _liveScaleDebounceTimer.Tick -= LiveScaleDebounceTimer_Tick;
         _clarityDebounceTimer.Stop();
         _clarityDebounceTimer.Tick -= ClarityDebounceTimer_Tick;
+        _preferencesSaveTimer.Stop();
+        _preferencesSaveTimer.Tick -= PreferencesSaveTimer_Tick;
+        _preferencesStore.Dispose();
+        _updateService.Dispose();
         _operationCancellation?.Dispose();
         _operationCancellation = null;
         RestoreOverlayCompatibility(_activeLaunch);
@@ -1242,6 +1429,268 @@ public partial class MainWindow : Window, IDisposable
                 string.Join(" ", newWarnings)
                     + " Fullscreen scaling and its verified mouse map remain active.");
         }
+    }
+
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        await CheckForUpdatesAsync(
+            showCurrentVersionMessage: true,
+            offerInstall: true).ConfigureAwait(true);
+    }
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        await InstallAvailableUpdateAsync().ConfigureAwait(true);
+    }
+
+    private async Task CheckForUpdatesAsync(
+        bool showCurrentVersionMessage,
+        bool offerInstall)
+    {
+        if (_isCheckingForUpdates || _isCloseCleanupRunning)
+        {
+            return;
+        }
+
+        _isCheckingForUpdates = true;
+        CheckUpdatesButton.Content = "Checking…";
+        CheckUpdatesButton.IsEnabled = false;
+        bool installRequested = false;
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
+        _updateCancellation = timeout;
+        try
+        {
+            ReleaseUpdateCheck check = await _updateService.CheckAsync(
+                CurrentAppVersion,
+                timeout.Token).ConfigureAwait(true);
+            if (!check.IsUpdateAvailable)
+            {
+                _availableUpdate = null;
+                UpdateAvailableBorder.Visibility = Visibility.Collapsed;
+                if (showCurrentVersionMessage)
+                {
+                    _ = MessageBox.Show(
+                        this,
+                        $"SpinFOURKAYYY {CurrentAppVersion.ToString(3)} is the "
+                            + "latest completed GitHub Release.",
+                        "SpinFOURKAYYY is up to date",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+            }
+            else
+            {
+                _availableUpdate = check.LatestRelease;
+                UpdateAvailableTitleText.Text =
+                    $"SpinFOURKAYYY {check.LatestRelease.Version.ToString(3)} is available";
+                UpdateAvailableDetailText.Text =
+                    $"You have {check.CurrentVersion.ToString(3)}. Install the verified "
+                        + "GitHub Release, keep every saved setting, and reopen "
+                        + "automatically.";
+                UpdateAvailableBorder.Visibility = Visibility.Visible;
+                RefreshActionAvailability();
+                if (offerInstall && CanInstallAvailableUpdate())
+                {
+                    MessageBoxResult choice = MessageBox.Show(
+                        this,
+                        $"SpinFOURKAYYY {check.LatestRelease.Version.ToString(3)} is "
+                            + "available.\n\nInstall it now? The download is verified "
+                            + "against GitHub's SHA-256 digest and release checksum. "
+                            + "SpinFOURKAYYY will close, keep your settings, install, "
+                            + "and reopen automatically.",
+                        "SpinFOURKAYYY update available",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Information,
+                        MessageBoxResult.Yes);
+                    installRequested = choice == MessageBoxResult.Yes;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (showCurrentVersionMessage && !_closeRequestedDuringUpdate)
+            {
+                ShowError(
+                    "Update check timed out",
+                    "GitHub did not respond in time. Your current version is "
+                        + "unchanged; try Check updates again later.");
+            }
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException
+                or IOException
+                or InvalidDataException
+                or NotSupportedException
+                or UnauthorizedAccessException)
+        {
+            if (showCurrentVersionMessage)
+            {
+                ShowError(
+                    "Could not check for updates",
+                    "Your current installation was not changed. " + exception.Message);
+            }
+            else
+            {
+                Debug.WriteLine(
+                    "SpinFOURKAYYY automatic update check skipped: "
+                        + exception.Message);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_updateCancellation, timeout))
+            {
+                _updateCancellation = null;
+            }
+
+            _isCheckingForUpdates = false;
+            CheckUpdatesButton.Content = "Check updates";
+            RefreshActionAvailability();
+        }
+
+        if (_closeRequestedDuringUpdate)
+        {
+            _ = Dispatcher.BeginInvoke(Close);
+            return;
+        }
+
+        if (installRequested)
+        {
+            await InstallAvailableUpdateAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async Task InstallAvailableUpdateAsync()
+    {
+        if (_availableUpdate is not { } release)
+        {
+            return;
+        }
+
+        if (!CanInstallAvailableUpdate())
+        {
+            _ = MessageBox.Show(
+                this,
+                "Finish the current action and exit EverQuest before installing. "
+                    + "The update remains available in the green banner.",
+                "Finish the current session first",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        _isBusy = true;
+        _isInstallingUpdate = true;
+        bool installerStarted = false;
+        OperationProgressBar.IsIndeterminate = false;
+        OperationProgressBar.Value = 0;
+        SetStatus(
+            StatusTone.Working,
+            $"DOWNLOADING {release.Version.ToString(3)}",
+            "Downloading the completed GitHub Release, then verifying its asset "
+                + "digest, checksum, package paths, manifest, and every app file.");
+        RefreshActionAvailability();
+        using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(10));
+        _updateCancellation = timeout;
+        try
+        {
+            await SavePreferencesSafelyAsync().ConfigureAwait(true);
+            Progress<int> progress = new(value =>
+            {
+                OperationProgressBar.Value = value;
+                if (value >= 92)
+                {
+                    SetStatus(
+                        StatusTone.Working,
+                        "VERIFYING UPDATE",
+                        "The package checksum passed. Verifying every staged app "
+                            + "file before SpinFOURKAYYY closes.");
+                }
+            });
+            PreparedReleaseUpdate prepared = await _updateService.PrepareAsync(
+                release,
+                progress,
+                timeout.Token).ConfigureAwait(true);
+            string currentExecutable = Environment.ProcessPath
+                ?? throw new InvalidOperationException(
+                    "Windows did not expose the current SpinFOURKAYYY executable path.");
+            using Process installer =
+                await GitHubReleaseUpdateService.StartInstallerAsync(
+                    prepared,
+                    currentExecutable,
+                    Environment.ProcessId,
+                    CurrentAppVersion,
+                    CancellationToken.None).ConfigureAwait(true);
+            installerStarted = true;
+            _allowCloseAfterCleanup = true;
+            Close();
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_closeRequestedDuringUpdate)
+            {
+                ShowError(
+                    "Update cancelled",
+                    "The update download did not finish. Your current installation and "
+                        + "saved settings were not changed.");
+            }
+        }
+        catch (Exception exception) when (IsExpectedUserFacingFailure(exception))
+        {
+            ShowError(
+                "Could not install the update",
+                "Your current installation and saved settings were not changed. "
+                    + exception.Message);
+        }
+        finally
+        {
+            _updateCancellation = null;
+            _isInstallingUpdate = false;
+            if (!installerStarted)
+            {
+                _isBusy = false;
+                OperationProgressBar.IsIndeterminate = false;
+                OperationProgressBar.Value = _isScaledSessionActive ? 100 : 0;
+                RefreshActionAvailability();
+                if (_closeRequestedDuringUpdate)
+                {
+                    _ = Dispatcher.BeginInvoke(Close);
+                }
+            }
+        }
+    }
+
+    private bool CanInstallAvailableUpdate() =>
+        _availableUpdate is not null
+        && !_isBusy
+        && !_isCloseCleanupRunning
+        && !_isScaledSessionActive
+        && !_scalingCleanupRequired
+        && _activeLaunch is null
+        && _activeLayoutSession is null
+        && !HasPendingPreparation;
+
+    private static Version GetCurrentAppVersion()
+    {
+        Assembly assembly = typeof(MainWindow).Assembly;
+        string? informationalVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        string numericVersion = (informationalVersion ?? string.Empty)
+            .Split('+', 2)[0]
+            .Split('-', 2)[0];
+        if (Version.TryParse(numericVersion, out Version? parsed)
+            && parsed.Build >= 0)
+        {
+            return GitHubReleaseUpdateService.NormalizeThreePartVersion(parsed);
+        }
+
+        return GitHubReleaseUpdateService.NormalizeThreePartVersion(
+            assembly.GetName().Version ?? new Version(1, 0, 5));
     }
 
     private async void ScalingHealthTimer_Tick(object? sender, EventArgs e)
@@ -2253,7 +2702,7 @@ public partial class MainWindow : Window, IDisposable
                         : " " + _spinUiFilterNotice));
     }
 
-    private void PopulateDisplays()
+    private void PopulateDisplays(PixelRect? preferredBounds = null)
     {
         IReadOnlyList<MonitorDescriptor> monitors = _windowPlacement.GetMonitors();
         DisplayChoice[] choices = monitors
@@ -2266,8 +2715,132 @@ public partial class MainWindow : Window, IDisposable
                             : $"Display {index + 1} · {FormatPixels(monitor.Bounds.Size)}"))
             .ToArray();
         TargetDisplayComboBox.ItemsSource = choices;
+        int preferredIndex = preferredBounds is { } bounds
+            ? Array.FindIndex(
+                choices,
+                choice => choice.Monitor.Bounds == bounds)
+            : -1;
         int primaryIndex = Array.FindIndex(choices, choice => choice.Monitor.IsPrimary);
-        TargetDisplayComboBox.SelectedIndex = primaryIndex >= 0 ? primaryIndex : 0;
+        TargetDisplayComboBox.SelectedIndex = preferredIndex >= 0
+            ? preferredIndex
+            : primaryIndex >= 0
+                ? primaryIndex
+                : 0;
+    }
+
+    private void ApplySavedPreferences(UserPreferences preferences)
+    {
+        ArgumentNullException.ThrowIfNull(preferences);
+        bool wasUpdating = _isUpdatingPresetCards;
+        _isUpdatingPresetCards = true;
+        try
+        {
+            FineScaleSlider.Value = new FineUiScale(
+                preferences.UiScaleHundredths).Factor;
+            QualityComboBox.SelectedIndex = preferences.ScalingFilter switch
+            {
+                ScalingFilter.Fsr => 1,
+                ScalingFilter.Lanczos => 2,
+                ScalingFilter.NearestNeighbor => 3,
+                _ => 0,
+            };
+            AntiAliasingComboBox.SelectedIndex = preferences.AntiAliasing switch
+            {
+                AntiAliasingMode.Smaa => 1,
+                AntiAliasingMode.Fxaa => 2,
+                _ => 0,
+            };
+            ClaritySlider.Value = preferences.ClarityPercent;
+            OverlayCompatibilityCheckBox.IsChecked =
+                preferences.MaintainTopmostOverlays;
+            bool strict = preferences.UiCompatibilityMode
+                == FourKayUiCompatibilityMode.SpinUiStrict;
+            _lastSpinUiPresetIndex = preferences.SpinUiPresetIndex;
+            CurrentUiModeRadioButton.IsChecked = !strict;
+            SpinUiModeRadioButton.IsChecked = strict;
+            SpinUiLayoutReadyCheckBox.IsChecked = false;
+            if (strict)
+            {
+                ComfortPresetRadio.IsChecked = preferences.SpinUiPresetIndex == 0;
+                BalancedPresetRadio.IsChecked = preferences.SpinUiPresetIndex == 1;
+                GentlePresetRadio.IsChecked = preferences.SpinUiPresetIndex == 2;
+                NativeClarityPresetRadio.IsChecked = false;
+            }
+            else
+            {
+                SyncGenericPresetSelection(FineScaleSlider.Value);
+            }
+        }
+        finally
+        {
+            _isUpdatingPresetCards = wasUpdating;
+        }
+
+        RefreshSpinUiDetection(force: true);
+        _ = NormalizeFilterForPreset();
+    }
+
+    private UserPreferences CapturePreferences()
+    {
+        PixelRect? targetBounds =
+            (TargetDisplayComboBox.SelectedItem as DisplayChoice)?.Monitor.Bounds;
+        return new UserPreferences
+        {
+            LegendsDirectory = _lastValidLegendsDirectory,
+            SpinTextureExecutablePath = _spinTextureExecutablePath,
+            TargetDisplayBounds = targetBounds,
+            UiScaleHundredths =
+                FineUiScale.FromSlider(FineScaleSlider.Value).Hundredths,
+            ScalingFilter = SelectedFilter(),
+            AntiAliasing = SelectedAntiAliasing(),
+            ClarityPercent = checked((int)Math.Round(
+                ClaritySlider.Value,
+                MidpointRounding.AwayFromZero)),
+            MaintainTopmostOverlays =
+                OverlayCompatibilityCheckBox.IsChecked == true,
+            UiCompatibilityMode = SelectedUiCompatibilityMode,
+            SpinUiPresetIndex = _lastSpinUiPresetIndex,
+        };
+    }
+
+    private void QueuePreferencesSave()
+    {
+        if (!_preferencesReady || _isCloseCleanupRunning)
+        {
+            return;
+        }
+
+        _preferencesSaveTimer.Stop();
+        _preferencesSaveTimer.Start();
+    }
+
+    private async void PreferencesSaveTimer_Tick(object? sender, EventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        _preferencesSaveTimer.Stop();
+        await SavePreferencesSafelyAsync().ConfigureAwait(true);
+    }
+
+    private async Task SavePreferencesSafelyAsync()
+    {
+        if (!_preferencesReady)
+        {
+            return;
+        }
+
+        try
+        {
+            await _preferencesStore.SaveAsync(
+                CapturePreferences(),
+                CancellationToken.None).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (IsExpectedUserFacingFailure(exception))
+        {
+            Debug.WriteLine(
+                "SpinFOURKAYYY could not save user preferences: "
+                    + exception.Message);
+        }
     }
 
     private ResolutionPlan CreateSelectedPlan(PixelSize target)
@@ -2423,6 +2996,7 @@ public partial class MainWindow : Window, IDisposable
             && !_scalingCleanupRequired
             && _activeLayoutSession is null
             && scaleReady;
+        PlayEnhancedButton.IsEnabled = PrepareLaunchButton.IsEnabled;
         AttachButton.IsEnabled =
             controlsAvailable
             && (_isScaledSessionActive
@@ -2432,6 +3006,9 @@ public partial class MainWindow : Window, IDisposable
             && !_isScaledSessionActive
             && !_scalingCleanupRequired
             && _activeRecoveryCount > 0;
+        CheckUpdatesButton.IsEnabled =
+            controlsAvailable && !_isCheckingForUpdates;
+        InstallUpdateButton.IsEnabled = CanInstallAvailableUpdate();
 
         PrepareLaunchButton.Content = _isScaledSessionActive
             ? "Live scaling is already active"
@@ -2443,6 +3020,16 @@ public partial class MainWindow : Window, IDisposable
                 + "normal Legends launcher. Above 100%, SpinFOURKAYYY also fits each "
                 + "personal UI layout before the game opens, saves that scale-specific "
                 + "layout, and restores native geometry after the game exits.";
+        PlayEnhancedButton.Content = _isScaledSessionActive
+            ? "Enhanced play is already active"
+            : _scalingCleanupRequired
+                ? "Finish scaling cleanup first"
+                : "Play Enhanced EQ";
+        PlayEnhancedButton.ToolTip =
+            "Uses SpinTexture's verified Play Enhanced flow to start the installed "
+                + "texture pack without opening LaunchPad, then applies the same "
+                + "safe layout preparation and fullscreen scaling. Use the normal "
+                + "Start button whenever EverQuest needs an update.";
         AttachButton.Content = _isScaledSessionActive
             ? "Stop fullscreen scaling"
             : _scalingCleanupRequired
@@ -2680,22 +3267,52 @@ public partial class MainWindow : Window, IDisposable
     }
 
     /// <summary>
-    /// Starts the normal LaunchPad and, when required, prepares a reversible
-    /// scale-specific copy of every discovered personal UI layout before the
-    /// game window appears.
+    /// Starts either the normal LaunchPad or SpinTexture's verified enhanced
+    /// wrapper and, when required, prepares a reversible scale-specific copy of
+    /// every discovered personal UI layout before the game window appears.
     /// </summary>
     private async Task LaunchThenAutoScaleCoreAsync(
+        FourKayGameStartMode startMode,
+        string? launchTargetPath,
         CancellationToken cancellationToken)
     {
         string eqDirectory = RequireValidLegendsDirectory();
-        string launcherPath = Path.Combine(eqDirectory, "LaunchPad.exe");
-        if (!File.Exists(launcherPath))
+        string launcherPath;
+        IReadOnlyList<string> launcherArguments;
+        if (startMode == FourKayGameStartMode.OfficialLauncher)
         {
-            throw new FileNotFoundException(
-                "LaunchPad.exe was not found. Nothing was started. "
-                    + "SpinFOURKAYYY will not bypass the normal Legends patcher; "
-                    + "restore the launcher or choose the correct folder.",
-                launcherPath);
+            launcherPath = Path.Combine(eqDirectory, "LaunchPad.exe");
+            if (!File.Exists(launcherPath))
+            {
+                throw new FileNotFoundException(
+                    "LaunchPad.exe was not found. Nothing was started. Restore the "
+                        + "launcher or choose the correct EverQuest Legends folder.",
+                    launcherPath);
+            }
+
+            launcherArguments = [];
+        }
+        else if (startMode == FourKayGameStartMode.SpinTextureEnhanced)
+        {
+            if (!PathLocator.IsSpinTextureExecutable(launchTargetPath))
+            {
+                _spinTextureExecutablePath = null;
+                QueuePreferencesSave();
+                throw new FileNotFoundException(
+                    "SpinTexture.exe could not be verified. Choose Play Enhanced EQ "
+                        + "again and select the SpinTexture application from its "
+                        + "fully extracted folder.",
+                    launchTargetPath);
+            }
+
+            launcherPath = Path.GetFullPath(launchTargetPath!);
+            launcherArguments = ["--play-enhanced", eqDirectory];
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(startMode),
+                "The requested game start mode is not supported.");
         }
 
         string magpieDirectory = PathLocator.FindMagpieDirectory();
@@ -2726,6 +3343,20 @@ public partial class MainWindow : Window, IDisposable
                     + "be verified. Nothing was prepared and no game window was "
                     + "touched. Exit every EverQuest client and try again.");
         }
+
+        string? recoveredLayoutMessage =
+            await RecoverPendingLayoutSessionBeforeLaunchAsync(
+                eqDirectory,
+                cancellationToken).ConfigureAwait(true);
+        if (recoveredLayoutMessage is not null)
+        {
+            SetStatus(
+                StatusTone.Working,
+                "EARLIER UI LAYOUT RECOVERED",
+                recoveredLayoutMessage + " Preparing this launch nowâ€¦");
+        }
+
+        await SavePreferencesSafelyAsync().ConfigureAwait(true);
 
         UiLayoutSessionState? preparedThisAttempt = null;
         try
@@ -2771,18 +3402,28 @@ public partial class MainWindow : Window, IDisposable
             SetStatus(
                 StatusTone.Working,
                 "WAITING FOR LEGENDS",
-                "The normal launcher is opening with a verified, normal-window "
-                    + $"{FormatPixels(plan.SourceResolution)} source. Finish patching "
-                    + "and sign in; fullscreen starts only after that managed window "
-                    + "is stable and its physical mouse map can be verified.");
+                startMode == FourKayGameStartMode.SpinTextureEnhanced
+                    ? "SpinTexture is verifying the installed enhanced pack and "
+                        + "starting EverQuest without LaunchPad. Sign in if prompted; "
+                        + $"fullscreen starts after the verified {FormatPixels(plan.SourceResolution)} "
+                        + "game window is stable and its physical mouse map passes."
+                    : "The normal launcher is opening with a verified, normal-window "
+                        + $"{FormatPixels(plan.SourceResolution)} source. Finish patching "
+                        + "and sign in; fullscreen starts only after that managed window "
+                        + "is stable and its physical mouse map can be verified.");
 
             FourKayLaunchResult result = await _launchService.LaunchAndScaleAsync(
                 new FourKayLaunchRequest
                 {
                     PreparedState = prepared,
                     LauncherPath = launcherPath,
+                    LauncherArguments = launcherArguments,
+                    StartMode = startMode,
                     MagpieDirectory = magpieDirectory,
-                    GameStartTimeout = TimeSpan.FromMinutes(15),
+                    GameStartTimeout = startMode
+                        == FourKayGameStartMode.SpinTextureEnhanced
+                            ? TimeSpan.FromMinutes(3)
+                            : TimeSpan.FromMinutes(15),
                     WindowTimeout = TimeSpan.FromMinutes(3),
                     ScalingTimeout = TimeSpan.FromSeconds(20),
                     RcasSharpness = SelectedClaritySharpness(),
@@ -3281,7 +3922,8 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             await ReloadActiveRecoveryStateAsync(
-                rebindLegendsPath: true,
+                rebindLegendsPath:
+                    !PathLocator.IsLegendsDirectory(LegendsPathTextBox.Text),
                 CancellationToken.None).ConfigureAwait(true);
             if (_activeState is null)
             {
@@ -3536,6 +4178,43 @@ public partial class MainWindow : Window, IDisposable
             result.OverlayCompatibility?.Warnings.Count ?? 0;
     }
 
+    private async Task<string?> RecoverPendingLayoutSessionBeforeLaunchAsync(
+        string eqDirectory,
+        CancellationToken cancellationToken)
+    {
+        UiLayoutSessionState? pending =
+            await _layoutProfileService.LoadActiveAsync(
+                eqDirectory,
+                PathLocator.LayoutProfileRoot,
+                cancellationToken).ConfigureAwait(true);
+        if (pending is null)
+        {
+            return null;
+        }
+
+        _activeLayoutSession = pending;
+        if (IsLegendsGameRunning(eqDirectory))
+        {
+            throw new InvalidOperationException(
+                "An earlier scale-aware UI layout session was found, but "
+                    + "EverQuest started running before it could be recovered. "
+                    + "Exit every EverQuest client and use Start EverQuest for me "
+                    + "again; SpinFOURKAYYY will recover it automatically.");
+        }
+
+        string? message = await FinalizeLayoutProfileIfGameClosedAsync(
+            cancellationToken).ConfigureAwait(true);
+        if (message is null)
+        {
+            throw new InvalidOperationException(
+                "An earlier scale-aware UI layout session still belongs to a "
+                    + "running EverQuest client. Exit the game, then try again so "
+                    + "SpinFOURKAYYY can recover it safely.");
+        }
+
+        return message;
+    }
+
     private string[] RestoreOverlayCompatibility(
         FourKayLaunchResult? launch)
     {
@@ -3659,6 +4338,7 @@ public partial class MainWindow : Window, IDisposable
 
     private static bool IsExpectedUserFacingFailure(Exception exception) =>
         exception is ArgumentException
+            or HttpRequestException
             or IOException
             or InvalidDataException
             or InvalidOperationException
