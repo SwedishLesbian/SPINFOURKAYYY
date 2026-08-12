@@ -139,6 +139,8 @@ internal static class PathLocator
     public static string PreferencesPath =>
         Path.Combine(StateRoot, "preferences.json");
 
+    public static string UpdateRoot => Path.Combine(StateRoot, "updates");
+
     private static IEnumerable<string> EnumerateLegendsCandidates()
     {
         yield return Environment.CurrentDirectory;

@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net.Http;
+using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation.Peers;
@@ -16,6 +18,7 @@ using SpinFourKay.Core.Layouts;
 using SpinFourKay.Core.Magpie;
 using SpinFourKay.Core.Orchestration;
 using SpinFourKay.Core.Preferences;
+using SpinFourKay.Core.Updates;
 using SpinFourKay.Core.Windows;
 
 namespace SpinFourKay.App;
@@ -23,6 +26,7 @@ namespace SpinFourKay.App;
 public partial class MainWindow : Window, IDisposable
 {
     private static readonly TimeSpan FullscreenResumeGrace = TimeSpan.FromSeconds(8);
+    private static readonly Version CurrentAppVersion = GetCurrentAppVersion();
 
     private readonly ResolutionPlanner _resolutionPlanner = new();
     private readonly SpinUiResolutionPlanner _spinUiResolutionPlanner = new();
@@ -47,6 +51,8 @@ public partial class MainWindow : Window, IDisposable
     private readonly DispatcherTimer _preferencesSaveTimer;
     private readonly UserPreferencesStore _preferencesStore = new(
         PathLocator.PreferencesPath);
+    private readonly GitHubReleaseUpdateService _updateService = new(
+        PathLocator.UpdateRoot);
     private bool _clarityReapplyPending;
     private int _overlayCompatibilityTickCount;
     private int _displayedOverlayWarningCount;
@@ -79,6 +85,11 @@ public partial class MainWindow : Window, IDisposable
     private string? _lastValidLegendsDirectory;
     private string? _spinTextureExecutablePath;
     private int _lastSpinUiPresetIndex = 2;
+    private ReleaseUpdateInfo? _availableUpdate;
+    private bool _isCheckingForUpdates;
+    private bool _isInstallingUpdate;
+    private bool _closeRequestedDuringUpdate;
+    private CancellationTokenSource? _updateCancellation;
     private FineUiScale? _pendingLiveScale;
     private int _activeRecoveryCount;
     private ScalingSessionSupervisionState _scalingSupervisionState =
@@ -183,6 +194,27 @@ public partial class MainWindow : Window, IDisposable
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         DetectRunningGameAtStartup();
         QueuePreferencesSave();
+        if (App.UpdatedFromVersion is { } previousVersion)
+        {
+            string currentVersion = CurrentAppVersion.ToString(3);
+            SetStatus(
+                StatusTone.Ready,
+                $"UPDATED TO {currentVersion}",
+                $"SpinFOURKAYYY updated from {previousVersion}. Your saved folder, "
+                    + "display, scaling, quality, UI, overlay, and SpinTexture "
+                    + "choices were kept.");
+            _ = MessageBox.Show(
+                this,
+                $"SpinFOURKAYYY updated successfully to {currentVersion}.\n\n"
+                    + "Your saved settings were kept and are ready to use.",
+                "SpinFOURKAYYY is up to date",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
+        await CheckForUpdatesAsync(
+            showCurrentVersionMessage: false,
+            offerInstall: App.UpdatedFromVersion is null).ConfigureAwait(true);
     }
 
     private void DetectRunningGameAtStartup()
@@ -1234,6 +1266,17 @@ public partial class MainWindow : Window, IDisposable
             return;
         }
 
+        if (_isCheckingForUpdates || _isInstallingUpdate)
+        {
+            _closeRequestedDuringUpdate = true;
+            _updateCancellation?.Cancel();
+            SetStatus(
+                StatusTone.Working,
+                "FINISHING UPDATE ACTIVITY",
+                "Cancelling the current download or update check safely, then closing.");
+            return;
+        }
+
         _preferencesSaveTimer.Stop();
         await SavePreferencesSafelyAsync().ConfigureAwait(true);
         _isCloseCleanupRunning = true;
@@ -1334,6 +1377,7 @@ public partial class MainWindow : Window, IDisposable
         _preferencesSaveTimer.Stop();
         _preferencesSaveTimer.Tick -= PreferencesSaveTimer_Tick;
         _preferencesStore.Dispose();
+        _updateService.Dispose();
         _operationCancellation?.Dispose();
         _operationCancellation = null;
         RestoreOverlayCompatibility(_activeLaunch);
@@ -1385,6 +1429,268 @@ public partial class MainWindow : Window, IDisposable
                 string.Join(" ", newWarnings)
                     + " Fullscreen scaling and its verified mouse map remain active.");
         }
+    }
+
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        await CheckForUpdatesAsync(
+            showCurrentVersionMessage: true,
+            offerInstall: true).ConfigureAwait(true);
+    }
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        await InstallAvailableUpdateAsync().ConfigureAwait(true);
+    }
+
+    private async Task CheckForUpdatesAsync(
+        bool showCurrentVersionMessage,
+        bool offerInstall)
+    {
+        if (_isCheckingForUpdates || _isCloseCleanupRunning)
+        {
+            return;
+        }
+
+        _isCheckingForUpdates = true;
+        CheckUpdatesButton.Content = "Checking…";
+        CheckUpdatesButton.IsEnabled = false;
+        bool installRequested = false;
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
+        _updateCancellation = timeout;
+        try
+        {
+            ReleaseUpdateCheck check = await _updateService.CheckAsync(
+                CurrentAppVersion,
+                timeout.Token).ConfigureAwait(true);
+            if (!check.IsUpdateAvailable)
+            {
+                _availableUpdate = null;
+                UpdateAvailableBorder.Visibility = Visibility.Collapsed;
+                if (showCurrentVersionMessage)
+                {
+                    _ = MessageBox.Show(
+                        this,
+                        $"SpinFOURKAYYY {CurrentAppVersion.ToString(3)} is the "
+                            + "latest completed GitHub Release.",
+                        "SpinFOURKAYYY is up to date",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+            }
+            else
+            {
+                _availableUpdate = check.LatestRelease;
+                UpdateAvailableTitleText.Text =
+                    $"SpinFOURKAYYY {check.LatestRelease.Version.ToString(3)} is available";
+                UpdateAvailableDetailText.Text =
+                    $"You have {check.CurrentVersion.ToString(3)}. Install the verified "
+                        + "GitHub Release, keep every saved setting, and reopen "
+                        + "automatically.";
+                UpdateAvailableBorder.Visibility = Visibility.Visible;
+                RefreshActionAvailability();
+                if (offerInstall && CanInstallAvailableUpdate())
+                {
+                    MessageBoxResult choice = MessageBox.Show(
+                        this,
+                        $"SpinFOURKAYYY {check.LatestRelease.Version.ToString(3)} is "
+                            + "available.\n\nInstall it now? The download is verified "
+                            + "against GitHub's SHA-256 digest and release checksum. "
+                            + "SpinFOURKAYYY will close, keep your settings, install, "
+                            + "and reopen automatically.",
+                        "SpinFOURKAYYY update available",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Information,
+                        MessageBoxResult.Yes);
+                    installRequested = choice == MessageBoxResult.Yes;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (showCurrentVersionMessage && !_closeRequestedDuringUpdate)
+            {
+                ShowError(
+                    "Update check timed out",
+                    "GitHub did not respond in time. Your current version is "
+                        + "unchanged; try Check updates again later.");
+            }
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException
+                or IOException
+                or InvalidDataException
+                or NotSupportedException
+                or UnauthorizedAccessException)
+        {
+            if (showCurrentVersionMessage)
+            {
+                ShowError(
+                    "Could not check for updates",
+                    "Your current installation was not changed. " + exception.Message);
+            }
+            else
+            {
+                Debug.WriteLine(
+                    "SpinFOURKAYYY automatic update check skipped: "
+                        + exception.Message);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_updateCancellation, timeout))
+            {
+                _updateCancellation = null;
+            }
+
+            _isCheckingForUpdates = false;
+            CheckUpdatesButton.Content = "Check updates";
+            RefreshActionAvailability();
+        }
+
+        if (_closeRequestedDuringUpdate)
+        {
+            _ = Dispatcher.BeginInvoke(Close);
+            return;
+        }
+
+        if (installRequested)
+        {
+            await InstallAvailableUpdateAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async Task InstallAvailableUpdateAsync()
+    {
+        if (_availableUpdate is not { } release)
+        {
+            return;
+        }
+
+        if (!CanInstallAvailableUpdate())
+        {
+            _ = MessageBox.Show(
+                this,
+                "Finish the current action and exit EverQuest before installing. "
+                    + "The update remains available in the green banner.",
+                "Finish the current session first",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        _isBusy = true;
+        _isInstallingUpdate = true;
+        bool installerStarted = false;
+        OperationProgressBar.IsIndeterminate = false;
+        OperationProgressBar.Value = 0;
+        SetStatus(
+            StatusTone.Working,
+            $"DOWNLOADING {release.Version.ToString(3)}",
+            "Downloading the completed GitHub Release, then verifying its asset "
+                + "digest, checksum, package paths, manifest, and every app file.");
+        RefreshActionAvailability();
+        using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(10));
+        _updateCancellation = timeout;
+        try
+        {
+            await SavePreferencesSafelyAsync().ConfigureAwait(true);
+            Progress<int> progress = new(value =>
+            {
+                OperationProgressBar.Value = value;
+                if (value >= 92)
+                {
+                    SetStatus(
+                        StatusTone.Working,
+                        "VERIFYING UPDATE",
+                        "The package checksum passed. Verifying every staged app "
+                            + "file before SpinFOURKAYYY closes.");
+                }
+            });
+            PreparedReleaseUpdate prepared = await _updateService.PrepareAsync(
+                release,
+                progress,
+                timeout.Token).ConfigureAwait(true);
+            string currentExecutable = Environment.ProcessPath
+                ?? throw new InvalidOperationException(
+                    "Windows did not expose the current SpinFOURKAYYY executable path.");
+            using Process installer =
+                await GitHubReleaseUpdateService.StartInstallerAsync(
+                    prepared,
+                    currentExecutable,
+                    Environment.ProcessId,
+                    CurrentAppVersion,
+                    CancellationToken.None).ConfigureAwait(true);
+            installerStarted = true;
+            _allowCloseAfterCleanup = true;
+            Close();
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_closeRequestedDuringUpdate)
+            {
+                ShowError(
+                    "Update cancelled",
+                    "The update download did not finish. Your current installation and "
+                        + "saved settings were not changed.");
+            }
+        }
+        catch (Exception exception) when (IsExpectedUserFacingFailure(exception))
+        {
+            ShowError(
+                "Could not install the update",
+                "Your current installation and saved settings were not changed. "
+                    + exception.Message);
+        }
+        finally
+        {
+            _updateCancellation = null;
+            _isInstallingUpdate = false;
+            if (!installerStarted)
+            {
+                _isBusy = false;
+                OperationProgressBar.IsIndeterminate = false;
+                OperationProgressBar.Value = _isScaledSessionActive ? 100 : 0;
+                RefreshActionAvailability();
+                if (_closeRequestedDuringUpdate)
+                {
+                    _ = Dispatcher.BeginInvoke(Close);
+                }
+            }
+        }
+    }
+
+    private bool CanInstallAvailableUpdate() =>
+        _availableUpdate is not null
+        && !_isBusy
+        && !_isCloseCleanupRunning
+        && !_isScaledSessionActive
+        && !_scalingCleanupRequired
+        && _activeLaunch is null
+        && _activeLayoutSession is null
+        && !HasPendingPreparation;
+
+    private static Version GetCurrentAppVersion()
+    {
+        Assembly assembly = typeof(MainWindow).Assembly;
+        string? informationalVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        string numericVersion = (informationalVersion ?? string.Empty)
+            .Split('+', 2)[0]
+            .Split('-', 2)[0];
+        if (Version.TryParse(numericVersion, out Version? parsed)
+            && parsed.Build >= 0)
+        {
+            return GitHubReleaseUpdateService.NormalizeThreePartVersion(parsed);
+        }
+
+        return GitHubReleaseUpdateService.NormalizeThreePartVersion(
+            assembly.GetName().Version ?? new Version(1, 0, 5));
     }
 
     private async void ScalingHealthTimer_Tick(object? sender, EventArgs e)
@@ -2700,6 +3006,9 @@ public partial class MainWindow : Window, IDisposable
             && !_isScaledSessionActive
             && !_scalingCleanupRequired
             && _activeRecoveryCount > 0;
+        CheckUpdatesButton.IsEnabled =
+            controlsAvailable && !_isCheckingForUpdates;
+        InstallUpdateButton.IsEnabled = CanInstallAvailableUpdate();
 
         PrepareLaunchButton.Content = _isScaledSessionActive
             ? "Live scaling is already active"
@@ -4029,6 +4338,7 @@ public partial class MainWindow : Window, IDisposable
 
     private static bool IsExpectedUserFacingFailure(Exception exception) =>
         exception is ArgumentException
+            or HttpRequestException
             or IOException
             or InvalidDataException
             or InvalidOperationException

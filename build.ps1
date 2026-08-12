@@ -37,6 +37,8 @@ $expectedDotNetRuntimeLicenseHash = 'D7A68596AB69B06F51CA278A6545148E4269A9381C2
 $expectedDotNetRuntimeNoticesHash = '40686C6447A7D5B5D3693068E4571B5F483D7ED335AEEE773EF662440DE4C5D5'
 $expectedWindowsDesktopLicenseHash = 'A89886665765362EB77E0F8E26602C924520041D1711B2EEDC136434FE4D01AB'
 $expectedMicrosoftUiXamlLicenseNormalizedHash = 'C9B411CE03FA461B4424A31502F30DC1798DA45266EBAED343FF5FB1629C64DF'
+$numericVersion = [regex]::Match($Version, '^\d+\.\d+\.\d+').Value
+$windowsVersion = "$numericVersion.0"
 
 function Assert-ChildPath {
     param(
@@ -407,18 +409,6 @@ foreach ($requiredPath in @(
     }
 }
 
-$appProjectXml = [xml][System.IO.File]::ReadAllText($appProject)
-$projectVersion = [string](
-    $appProjectXml.Project.PropertyGroup.Version |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-        Select-Object -First 1)
-if (-not [string]::Equals(
-    $projectVersion,
-    $Version,
-    [System.StringComparison]::Ordinal)) {
-    throw "Requested release version '$Version' does not match the app project version '$projectVersion'. Update both before packaging."
-}
-
 $actualMagpieArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $magpieArchive).Hash
 if ($actualMagpieArchiveHash -ne $expectedMagpieArchiveHash) {
     throw "The Magpie release archive failed SHA-256 verification. Expected $expectedMagpieArchiveHash; found $actualMagpieArchiveHash."
@@ -506,6 +496,9 @@ Invoke-DotNet -Arguments @(
     '-p:DebugType=None',
     '-p:DebugSymbols=false',
     "-p:Version=$Version",
+    "-p:AssemblyVersion=$windowsVersion",
+    "-p:FileVersion=$windowsVersion",
+    "-p:InformationalVersion=$Version",
     '--output', $publishRoot
 )
 

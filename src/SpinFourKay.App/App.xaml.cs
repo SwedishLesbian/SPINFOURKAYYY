@@ -1,3 +1,7 @@
+using System.IO;
+using SpinFourKay.App.Infrastructure;
+using SpinFourKay.Core.Updates;
+
 namespace SpinFourKay.App;
 
 public partial class App : System.Windows.Application
@@ -8,8 +12,17 @@ public partial class App : System.Windows.Application
     private static Mutex? _singleInstanceMutex;
     private static bool _ownsSingleInstanceMutex;
 
+    public static string? UpdatedFromVersion { get; private set; }
+
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
+        if (ReleaseUpdateInstaller.IsApplyCommand(e.Args))
+        {
+            RunUpdateInstaller(e.Args);
+            return;
+        }
+
+        UpdatedFromVersion = ReadUpdatedFromVersion(e.Args);
         _singleInstanceMutex = new Mutex(
             initiallyOwned: true,
             SingleInstanceMutexName,
@@ -30,6 +43,62 @@ public partial class App : System.Windows.Application
         }
 
         base.OnStartup(e);
+    }
+
+    private static void RunUpdateInstaller(string[] arguments)
+    {
+        try
+        {
+            if (arguments.Length != 2)
+            {
+                throw new InvalidDataException(
+                    "The update installer requires one verified request file.");
+            }
+
+            _ = ReleaseUpdateInstaller.ApplyFromRequestAsync(
+                    arguments[1],
+                    PathLocator.UpdateRoot,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            Current.Shutdown(0);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or IOException
+                or InvalidDataException
+                or InvalidOperationException
+                or NotSupportedException
+                or UnauthorizedAccessException
+                or System.Security.SecurityException
+                or TimeoutException)
+        {
+            _ = System.Windows.MessageBox.Show(
+                "SpinFOURKAYYY could not finish the update. "
+                    + exception.Message,
+                "SpinFOURKAYYY update needs attention",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Error);
+            Current.Shutdown(1);
+        }
+    }
+
+    private static string? ReadUpdatedFromVersion(string[] arguments)
+    {
+        for (int index = 0; index + 1 < arguments.Length; index++)
+        {
+            if (string.Equals(
+                    arguments[index],
+                    ReleaseUpdateInstaller.UpdatedFromArgument,
+                    StringComparison.OrdinalIgnoreCase)
+                && Version.TryParse(arguments[index + 1], out Version? version)
+                && version.Build >= 0)
+            {
+                return version.ToString(3);
+            }
+        }
+
+        return null;
     }
 
     protected override void OnExit(System.Windows.ExitEventArgs e)

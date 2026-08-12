@@ -32,6 +32,7 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 - Keeps supported DPS meters and companion overlays above the scaled game.
 - Includes readable presets for a quick, good-looking setup.
 - Uses safe backups and recovery if the game, app, or Windows closes unexpectedly.
+- Checks completed GitHub Releases and can verify, install, and reopen updates for you.
 - Runs alongside EverQuest without injecting into or modifying the game.
 
 ## Quick start
@@ -45,6 +46,12 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 Your first launch at a new size may take a moment while the app prepares a matching copy of your current layout. After that, you can play normally and move windows or edit hotbars as usual. Those layout changes are saved for that size when the game closes.
 
 The next time you open SpinFOURKAYYY, your last setup is ready to use again.
+
+## Automatic updates
+
+SpinFOURKAYYY checks the latest completed GitHub Release when it opens. When a newer stable version is available, the app clearly offers to download and safely verify it before anything closes.
+
+Choose **Install update** after EverQuest is closed. SpinFOURKAYYY keeps your saved settings in place, replaces only files owned by the app, reopens the new version automatically, and confirms the installed version. You can also use **Check updates** in the top-right corner at any time.
 
 ## Play with SpinTexture
 
@@ -108,6 +115,8 @@ Developers need Windows x64, the .NET 9 SDK, PowerShell, Git, and internet acces
 ```powershell
 .\build.ps1
 ```
+
+For a release package with a specific semantic version, use `./build.ps1 -Version 1.0.6`. The GitHub **Release** workflow also accepts either `1.0.6` or `v1.0.6` and applies that version automatically; editing the project file first is not required.
 
 ## License and trademarks
 
