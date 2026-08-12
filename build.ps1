@@ -7,7 +7,7 @@ param(
     [string]$Runtime = 'win-x64',
 
     [ValidatePattern('^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$')]
-    [string]$Version = '1.0.4',
+    [string]$Version = '1.0.5',
 
     [switch]$SkipSelfTest
 )
