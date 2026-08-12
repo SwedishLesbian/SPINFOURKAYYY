@@ -10,8 +10,12 @@
 
 <p align="center">
   <a href="https://github.com/itsspin/SPINFOURKAYYY/releases/latest"><strong>Download the latest release</strong></a>
-  &nbsp;·&nbsp;
+  &nbsp;&middot;&nbsp;
+  <a href="https://itsspin.github.io/spintexture/"><strong>Improve textures with SpinTexture</strong></a>
+  &nbsp;&middot;&nbsp;
   <a href="https://github.com/itsspin/spinips"><strong>Try SpinUI</strong></a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/itsspin/spinips#spins-loremaster"><strong>Try Spin's Loremaster</strong></a>
 </p>
 
 SpinFOURKAYYY makes the complete EverQuest Legends interface easier to read on 4K, ultrawide, and other high-resolution monitors. Choose the size that feels right, launch EverQuest normally, and the app prepares your personal UI layout for you.
@@ -63,13 +67,13 @@ Supported overlays can open before or after scaling starts. Run the overlay, Eve
 If EQ Legends Companion is set to hide overlays when the game loses focus, turn that option off while using fullscreen scaling.
 SpinFOURKAYYY also leaves Companion's own lock and click-through controls in charge, so lock a panel when you are not editing it.
 
-## Try SpinUI
+## More from Spin
 
-SpinFOURKAYYY works with any EverQuest UI, but it pairs especially well with **SpinUI**—our complete EverQuest Legends interface overhaul with matching layouts and useful companion tools.
+- **[SpinTexture](https://itsspin.github.io/spintexture/)** improves EverQuest Legends world textures while preserving the game's classic look.
+- **[SpinUI](https://github.com/itsspin/spinips)** is a complete EverQuest Legends interface overhaul with matching layouts for different resolutions.
+- **[Spin's Loremaster](https://github.com/itsspin/spinips#spins-loremaster)** is a live encounter, progression, loot, travel, and adventure companion included with the SpinUI project.
 
-### [Visit the SpinUI GitHub repository →](https://github.com/itsspin/spinips)
-
-SpinUI is completely optional. Select **Current/default/custom UI** in SpinFOURKAYYY if you want to keep using your existing interface.
+All three are optional. SpinFOURKAYYY still works with the default interface, custom UIs, and your existing textures. Select **Current/default/custom UI** if you do not use SpinUI.
 
 ## Helpful notes
 
