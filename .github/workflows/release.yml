@@ -8,7 +8,7 @@ on:
     inputs:
       tag:
         description: >-
-          Release tag (for example v1.0.4). Must match the app project
+          Release tag (for example v1.0.5). Must match the app project
           <Version>. If the tag does not exist yet it is created from the
           branch this workflow runs on; if it exists, that tag is rebuilt
           and the release assets are refreshed.
