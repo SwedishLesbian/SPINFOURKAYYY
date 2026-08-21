@@ -59,6 +59,33 @@
                 <StackPanel Grid.Column="2"
                             VerticalAlignment="Center"
                             Orientation="Horizontal">
+                    <Button x:Name="MakeShortcutButton"
+                            MinHeight="40"
+                            Margin="0,0,7,0"
+                            Padding="13,7"
+                            AutomationProperties.Name="Make a desktop shortcut"
+                            AutomationProperties.HelpText="Opens a menu with a normal and an enhanced desktop shortcut that start EverQuest with your saved SpinFOURKAYYY choices."
+                            ToolTip="Put a shortcut on your desktop that plays with your saved choices"
+                            Style="{StaticResource QuietButton}"
+                            Click="MakeShortcut_Click"
+                            Content="Make Shortcut">
+                        <Button.ContextMenu>
+                            <ContextMenu x:Name="MakeShortcutMenu"
+                                         MinWidth="288"
+                                         Style="{StaticResource ShortcutMenu}">
+                                <MenuItem x:Name="MakeNormalShortcutMenuItem"
+                                          AutomationProperties.HelpText="Creates a desktop shortcut that starts EverQuest through the normal launcher with your saved choices."
+                                          Style="{StaticResource ShortcutMenuItem}"
+                                          Click="MakeNormalShortcut_Click"
+                                          Header="Make EverQuest Shortcut" />
+                                <MenuItem x:Name="MakeEnhancedShortcutMenuItem"
+                                          AutomationProperties.HelpText="Creates a desktop shortcut that starts the enhanced texture pack through SpinTexture with your saved choices."
+                                          Style="{StaticResource ShortcutMenuItem}"
+                                          Click="MakeEnhancedShortcut_Click"
+                                          Header="Make Enhanced EverQuest Shortcut" />
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                    </Button>
                     <Button x:Name="CheckUpdatesButton"
                             MinHeight="40"
                             Margin="0,0,7,0"

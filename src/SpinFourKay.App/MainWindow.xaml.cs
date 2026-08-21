@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -18,6 +19,7 @@ using SpinFourKay.Core.Layouts;
 using SpinFourKay.Core.Magpie;
 using SpinFourKay.Core.Orchestration;
 using SpinFourKay.Core.Preferences;
+using SpinFourKay.Core.Startup;
 using SpinFourKay.Core.Updates;
 using SpinFourKay.Core.Windows;
 
@@ -81,6 +83,7 @@ public partial class MainWindow : Window, IDisposable
     private bool _allowCloseAfterCleanup;
     private bool _isUpdatingPresetCards;
     private bool _startupRunningGameDetectionAttempted;
+    private bool _autoPlayAttempted;
     private bool _preferencesReady;
     private string? _lastValidLegendsDirectory;
     private string? _spinTextureExecutablePath;
@@ -212,9 +215,152 @@ public partial class MainWindow : Window, IDisposable
                 MessageBoxImage.Information);
         }
 
+        // A shortcut launch must not be answered with an install prompt the
+        // player did not open. The update banner and Install update button
+        // still appear; only the modal question is skipped.
         await CheckForUpdatesAsync(
             showCurrentVersionMessage: false,
-            offerInstall: App.UpdatedFromVersion is null).ConfigureAwait(true);
+            offerInstall: App.UpdatedFromVersion is null
+                && !App.StartupSwitches.RequestsAutoPlay).ConfigureAwait(true);
+        await TryStartRequestedAutoPlayAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Starts the game without further input when SpinFOURKAYYY was opened by a
+    /// <c>--play</c> or <c>--play-enhanced</c> shortcut. The launch runs the
+    /// same code path as the on-screen buttons; only the trigger differs, so an
+    /// unattended start can never take a route the manual one does not.
+    /// </summary>
+    private async Task TryStartRequestedAutoPlayAsync()
+    {
+        if (_autoPlayAttempted)
+        {
+            return;
+        }
+
+        _autoPlayAttempted = true;
+        StartupCommandLine startup = App.StartupSwitches;
+        if (startup.AutoPlayRejection is { } rejection)
+        {
+            SetStatus(StatusTone.Warning, "SHORTCUT NOT UNDERSTOOD", rejection);
+            return;
+        }
+
+        if (!startup.RequestsAutoPlay)
+        {
+            return;
+        }
+
+        // The launch button is the single authority on whether a launch may
+        // proceed. An unattended start asks it rather than repeating its rules.
+        RefreshActionAvailability();
+        if (!PrepareLaunchButton.IsEnabled)
+        {
+            AdvancedExpander.IsExpanded = true;
+            SetStatus(
+                StatusTone.Warning,
+                "AUTOMATIC START SKIPPED",
+                DescribeAutoPlayBlock());
+            return;
+        }
+
+        if (startup.AutoPlay == AutoPlayMode.SpinTextureEnhanced)
+        {
+            // A desktop shortcut must never answer a double-click with a file
+            // picker, so an unknown SpinTexture location refuses instead of
+            // prompting the way the on-screen button does.
+            string? spinTexturePath =
+                PathLocator.IsSpinTextureExecutable(_spinTextureExecutablePath)
+                    ? Path.GetFullPath(_spinTextureExecutablePath!)
+                    : PathLocator.FindSpinTextureExecutable();
+            if (spinTexturePath is null)
+            {
+                SetStatus(
+                    StatusTone.Warning,
+                    "SPINTEXTURE NOT SET UP YET",
+                    "The enhanced shortcut needs SpinTexture. Use Play Enhanced "
+                        + "EQ here once and choose SpinTexture.exe from its fully "
+                        + "extracted folder; the shortcut works from then on. "
+                        + "Nothing was started.");
+                return;
+            }
+
+            _spinTextureExecutablePath = spinTexturePath;
+            QueuePreferencesSave();
+            await RunOperationAsync(
+                "PREPARING ENHANCED EVERQUEST",
+                "Starting from your desktop shortcut using your saved size, "
+                    + "quality, display and UI choices\u2026",
+                token => LaunchThenAutoScaleCoreAsync(
+                    FourKayGameStartMode.SpinTextureEnhanced,
+                    spinTexturePath,
+                    token)).ConfigureAwait(true);
+            return;
+        }
+
+        await RunOperationAsync(
+            "PREPARING AND STARTING EVERQUEST",
+            "Starting from your desktop shortcut using your saved size, quality, "
+                + "display and UI choices\u2026",
+            token => LaunchThenAutoScaleCoreAsync(
+                FourKayGameStartMode.OfficialLauncher,
+                launchTargetPath: null,
+                token)).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Supplies the wording for a refused unattended start. This never decides
+    /// whether a launch may happen; it only explains a decision already made by
+    /// <see cref="RefreshActionAvailability"/>.
+    /// </summary>
+    private string DescribeAutoPlayBlock()
+    {
+        if (_isBusy || _isCloseCleanupRunning)
+        {
+            return "SpinFOURKAYYY is still finishing another action, so nothing "
+                + "was started. Use Start EverQuest for me once it finishes.";
+        }
+
+        if (_isScaledSessionActive || _scalingCleanupRequired)
+        {
+            return "A fullscreen scaling session is still active or still needs "
+                + "cleanup, so nothing was started. Finish it here first.";
+        }
+
+        if (!PathLocator.IsLegendsDirectory(LegendsPathTextBox.Text))
+        {
+            return "The saved EverQuest Legends folder could not be verified, so "
+                + "nothing was started. Choose the folder containing eqgame.exe "
+                + "and eqclient.ini, then use the shortcut again.";
+        }
+
+        try
+        {
+            _ = PathLocator.FindMagpieDirectory();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return "The Engine\\Magpie folder is incomplete, so nothing was "
+                + "started. Re-extract the whole release into one folder.";
+        }
+
+        if (UsesStrictSpinUiMode && !IsUiSessionConfirmationSatisfied)
+        {
+            return "SpinUI mode still needs its one-time layout confirmation, so "
+                + "nothing was started. Confirm it here, then use the shortcut "
+                + "again.";
+        }
+
+        if (_display is null || _currentPlan is null)
+        {
+            return "A display and size could not be prepared from your saved "
+                + "settings, so nothing was started. Choose them here, then use "
+                + "the shortcut again.";
+        }
+
+        return "Your saved settings could not be used for an unattended start, "
+            + "so nothing was started. Check the highlighted options here, then "
+            + "use Start EverQuest for me.";
     }
 
     private void DetectRunningGameAtStartup()
@@ -225,13 +371,7 @@ public partial class MainWindow : Window, IDisposable
         }
 
         _startupRunningGameDetectionAttempted = true;
-        if (Environment.GetCommandLineArgs()
-            .Skip(1)
-            .Any(
-                argument => string.Equals(
-                    argument,
-                    "--manual",
-                    StringComparison.OrdinalIgnoreCase)))
+        if (App.StartupSwitches.SkipRunningGameDetection)
         {
             SetStatus(
                 StatusTone.Info,
@@ -1229,6 +1369,114 @@ public partial class MainWindow : Window, IDisposable
         catch (Exception exception) when (IsExpectedUserFacingFailure(exception))
         {
             ShowError("Scaling engine not found", exception.Message);
+        }
+    }
+
+    private void MakeShortcut_Click(object sender, RoutedEventArgs e)
+    {
+        _ = e;
+        if (sender is not Button button || button.ContextMenu is not { } menu)
+        {
+            return;
+        }
+
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.HorizontalOffset = 0;
+        menu.VerticalOffset = 4;
+        menu.IsOpen = true;
+    }
+
+    private void MakeNormalShortcut_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        CreateDesktopShortcut(DesktopShortcutKind.NormalPlay);
+    }
+
+    private void MakeEnhancedShortcut_Click(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        CreateDesktopShortcut(DesktopShortcutKind.EnhancedPlay);
+    }
+
+    /// <summary>
+    /// Writes one desktop shortcut that reopens SpinFOURKAYYY with the matching
+    /// play switch. Replacing an existing shortcut is confirmed first, because
+    /// a file on the user's desktop may have been customized by hand.
+    /// </summary>
+    private void CreateDesktopShortcut(DesktopShortcutKind kind)
+    {
+        try
+        {
+            // The release is published as a single file, so the running
+            // executable path is the only usable shortcut target.
+            string applicationPath = Environment.ProcessPath
+                ?? throw new InvalidOperationException(
+                    "The running SpinFOURKAYYY executable could not be located, "
+                        + "so no shortcut was created.");
+            string? legendsDirectory =
+                PathLocator.IsLegendsDirectory(LegendsPathTextBox.Text)
+                    ? Path.GetFullPath(LegendsPathTextBox.Text)
+                    : _lastValidLegendsDirectory;
+            DesktopShortcutPlan plan = DesktopShortcutPlan.Create(
+                kind,
+                applicationPath,
+                legendsDirectory);
+
+            string desktopDirectory = Environment.GetFolderPath(
+                Environment.SpecialFolder.DesktopDirectory,
+                Environment.SpecialFolderOption.DoNotVerify);
+            if (string.IsNullOrWhiteSpace(desktopDirectory)
+                || !Directory.Exists(desktopDirectory))
+            {
+                ShowError(
+                    "Desktop folder not found",
+                    "Windows did not report a usable desktop folder, so no "
+                        + "shortcut was created. Nothing else was changed.");
+                return;
+            }
+
+            string destination = plan.ResolveDestinationPath(desktopDirectory);
+            if (File.Exists(destination)
+                && MessageBox.Show(
+                    this,
+                    $"Replace the existing \"{plan.FileName}\" on your desktop?"
+                        + "\n\nThe replacement starts EverQuest with the settings "
+                        + "saved in SpinFOURKAYYY. Any changes you made to the "
+                        + "existing shortcut yourself would be lost.",
+                    "Replace desktop shortcut",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question,
+                    MessageBoxResult.No) != MessageBoxResult.Yes)
+            {
+                SetStatus(
+                    StatusTone.Info,
+                    "SHORTCUT LEFT ALONE",
+                    $"The existing \"{plan.FileName}\" on your desktop was not "
+                        + "changed.");
+                return;
+            }
+
+            _ = WindowsShortcutService.Save(plan, destination);
+            SetStatus(
+                StatusTone.Ready,
+                "DESKTOP SHORTCUT READY",
+                $"\"{plan.FileName}\" is on your desktop. Opening it starts "
+                    + (kind == DesktopShortcutKind.EnhancedPlay
+                        ? "the enhanced texture pack through SpinTexture "
+                        : "EverQuest through the normal launcher ")
+                    + "using the settings saved here. "
+                    + (plan.UsesLegendsIcon
+                        ? "It uses the EverQuest Legends icon from your "
+                            + "installed client."
+                        : "It uses the SpinFOURKAYYY icon because no EverQuest "
+                            + "Legends folder is selected yet."));
+        }
+        catch (Exception exception) when (IsExpectedUserFacingFailure(exception))
+        {
+            ShowError("Could not create the shortcut", exception.Message);
         }
     }
 

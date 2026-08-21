@@ -73,6 +73,13 @@ public static class WindowsShortcutService
             link.SetShowCmd(ShowNormal);
             ((IPersistFile)link).Save(fullShortcutPath, fRemember: true);
         }
+        catch (COMException exception)
+        {
+            throw new IOException(
+                "Windows could not write the shortcut, so nothing was changed. "
+                    + exception.Message,
+                exception);
+        }
         finally
         {
             _ = Marshal.FinalReleaseComObject(link);
@@ -84,9 +91,7 @@ public static class WindowsShortcutService
             saved = Read(fullShortcutPath);
         }
         catch (Exception exception) when (
-            exception is COMException
-                or IOException
-                or UnauthorizedAccessException)
+            exception is IOException or UnauthorizedAccessException)
         {
             DeleteUnverifiedShortcut(fullShortcutPath);
             throw new IOException(
@@ -156,6 +161,12 @@ public static class WindowsShortcutService
                 description.ToString(),
                 iconPath.ToString(),
                 iconIndex);
+        }
+        catch (COMException exception)
+        {
+            throw new IOException(
+                "Windows could not read the shortcut file. " + exception.Message,
+                exception);
         }
         finally
         {

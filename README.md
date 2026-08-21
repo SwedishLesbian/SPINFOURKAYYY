@@ -28,6 +28,7 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 - Remembers your Legends folder, monitor, size, quality, and overlay choices.
 - Automatically fits your existing layout to the size you choose.
 - Remembers layout changes separately for each size.
+- Creates desktop shortcuts that play straight away with your saved choices.
 - Restores your native layout when EverQuest exits.
 - Keeps supported DPS meters and companion overlays above the scaled game.
 - Includes readable presets for a quick, good-looking setup.
@@ -58,6 +59,19 @@ Choose **Install update** after EverQuest is closed. SpinFOURKAYYY keeps your sa
 If you use [SpinTexture](https://itsspin.github.io/spintexture/), install and verify your enhanced texture pack there first. Then click **Play Enhanced EQ** in SpinFOURKAYYY and choose `SpinTexture.exe` the first time. The app remembers that location, asks SpinTexture to verify the installed pack, starts EverQuest without LaunchPad replacing it, and applies your normal SpinFOURKAYYY layout and scaling choices.
 
 Use **Start EverQuest for me** whenever the game needs an update. After updating, reinstall or verify the enhanced pack in SpinTexture before using **Play Enhanced EQ** again. The enhanced flow never reads or reuses account credentials; sign-in behavior may differ from the normal launcher.
+
+## Desktop shortcuts
+
+Choose **Make Shortcut** in the top-right corner to put a one-click shortcut on your desktop.
+
+- **Make EverQuest Shortcut** starts EverQuest through the normal launcher.
+- **Make Enhanced EverQuest Shortcut** starts the enhanced texture pack through SpinTexture.
+
+Either shortcut opens SpinFOURKAYYY and begins your last used setup immediately, with the same folder, display, size, quality, UI and overlay choices you had saved. The shortcut shows the EverQuest Legends icon from your own installed client, so no game artwork is copied onto your computer. If no Legends folder is selected yet, the SpinFOURKAYYY icon is used instead.
+
+If SpinFOURKAYYY cannot use your saved settings, it opens normally and explains what needs attention instead of starting the game. The enhanced shortcut needs SpinTexture chosen once through **Play Enhanced EQ** before it will work. SpinFOURKAYYY still runs one at a time, so close it before using a shortcut.
+
+You can also start SpinFOURKAYYY with `--play` or `--play-enhanced` yourself; the shortcuts simply save you from typing them.
 
 ## Choosing a size
 

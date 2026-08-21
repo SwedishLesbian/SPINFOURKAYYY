@@ -1,5 +1,6 @@
 using System.IO;
 using SpinFourKay.App.Infrastructure;
+using SpinFourKay.Core.Startup;
 using SpinFourKay.Core.Updates;
 
 namespace SpinFourKay.App;
@@ -14,6 +15,14 @@ public partial class App : System.Windows.Application
 
     public static string? UpdatedFromVersion { get; private set; }
 
+    /// <summary>
+    /// The startup switches this instance was opened with. Parsed once here so
+    /// the launch gate and the running-game detector cannot disagree about what
+    /// was requested.
+    /// </summary>
+    public static StartupCommandLine StartupSwitches { get; private set; } =
+        StartupCommandLine.Default;
+
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
         if (ReleaseUpdateInstaller.IsApplyCommand(e.Args))
@@ -22,6 +31,7 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        StartupSwitches = StartupCommandLine.Parse(e.Args);
         UpdatedFromVersion = ReadUpdatedFromVersion(e.Args);
         _singleInstanceMutex = new Mutex(
             initiallyOwned: true,
