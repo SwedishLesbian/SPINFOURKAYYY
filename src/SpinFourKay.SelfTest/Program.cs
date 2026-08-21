@@ -14,6 +14,7 @@ using SpinFourKay.Core.Layouts;
 using SpinFourKay.Core.Magpie;
 using SpinFourKay.Core.Orchestration;
 using SpinFourKay.Core.Preferences;
+using SpinFourKay.Core.Startup;
 using SpinFourKay.Core.Updates;
 using SpinFourKay.Core.Windows;
 
@@ -82,6 +83,15 @@ internal static class Program
         runner.Add(
             "Preferences / corruption and invalid values use safe defaults",
             PreferencesCorruptionAndValidationAsync);
+        runner.Add(
+            "Startup / play switches, conflicts, and unknown arguments",
+            StartupSwitchInterpretation);
+        runner.Add(
+            "Shortcuts / desktop plan contents and icon fallback",
+            DesktopShortcutPlanContentsAsync);
+        runner.Add(
+            "Shortcuts / verified .lnk round trip and refusals",
+            WindowsShortcutVerifiedRoundTripAsync);
         runner.Add(
             "Updates / GitHub release discovery and verified staging",
             UpdateDiscoveryAndVerifiedStagingAsync);
@@ -9363,6 +9373,204 @@ internal static class Program
 
         return count;
     }
+
+    private static void StartupSwitchInterpretation()
+    {
+        Assert.Equal(AutoPlayMode.None, StartupCommandLine.Parse(null).AutoPlay);
+        Assert.Equal(AutoPlayMode.None, StartupCommandLine.Parse([]).AutoPlay);
+        Assert.False(StartupCommandLine.Parse([]).RequestsAutoPlay);
+
+        StartupCommandLine play = StartupCommandLine.Parse(["--play"]);
+        Assert.Equal(AutoPlayMode.OfficialLauncher, play.AutoPlay);
+        Assert.True(play.RequestsAutoPlay);
+        Assert.Null(play.AutoPlayRejection);
+        Assert.False(play.SkipRunningGameDetection);
+
+        // Switch order, casing, and surrounding whitespace must not change the
+        // interpretation; a desktop shortcut is edited by hand more often than
+        // the application is.
+        StartupCommandLine enhanced = StartupCommandLine.Parse(
+            ["--updated-from", "1.0.6", "  --MANUAL  ", "--Play-Enhanced"]);
+        Assert.Equal(AutoPlayMode.SpinTextureEnhanced, enhanced.AutoPlay);
+        Assert.True(enhanced.SkipRunningGameDetection);
+        Assert.Null(enhanced.AutoPlayRejection);
+
+        // Unrecognized switches are ignored so a future release can add one
+        // without older builds refusing to open.
+        Assert.Equal(
+            AutoPlayMode.OfficialLauncher,
+            StartupCommandLine.Parse(["--future-switch", "--play"]).AutoPlay);
+
+        // The updater's version value is consumed, so a malformed pair can
+        // never be misread as a launch request.
+        Assert.Equal(
+            AutoPlayMode.None,
+            StartupCommandLine.Parse(["--updated-from", "--play"]).AutoPlay);
+
+        // Ambiguity refuses instead of silently choosing one launch path.
+        StartupCommandLine conflict =
+            StartupCommandLine.Parse(["--play", "--play-enhanced"]);
+        Assert.Equal(AutoPlayMode.None, conflict.AutoPlay);
+        Assert.False(conflict.RequestsAutoPlay);
+        Assert.Contains(
+            "--play-enhanced",
+            conflict.AutoPlayRejection ?? string.Empty);
+
+        // Repeats are idempotent and blank entries are inert.
+        Assert.Equal(
+            AutoPlayMode.OfficialLauncher,
+            StartupCommandLine.Parse(["--play", "--play"]).AutoPlay);
+        Assert.Equal(
+            AutoPlayMode.None,
+            StartupCommandLine.Parse(["", "   "]).AutoPlay);
+    }
+
+    private static async Task DesktopShortcutPlanContentsAsync()
+    {
+        await using TempDirectory temp = new();
+        ShortcutFixture fixture = await ShortcutFixture.CreateAsync(temp.Path)
+            .ConfigureAwait(false);
+
+        DesktopShortcutPlan normal = DesktopShortcutPlan.Create(
+            DesktopShortcutKind.NormalPlay,
+            fixture.ApplicationPath,
+            fixture.LegendsDirectory);
+        Assert.Equal("EverQuest (SpinFOURKAYYY).lnk", normal.FileName);
+        Assert.Equal(StartupCommandLine.PlayArgument, normal.Arguments);
+        Assert.Equal(fixture.ApplicationPath, normal.TargetPath);
+        Assert.Equal(fixture.ApplicationDirectory, normal.WorkingDirectory);
+        Assert.Equal(fixture.EqGamePath, normal.IconPath);
+        Assert.Equal(0, normal.IconIndex);
+        Assert.True(normal.UsesLegendsIcon);
+
+        DesktopShortcutPlan enhanced = DesktopShortcutPlan.Create(
+            DesktopShortcutKind.EnhancedPlay,
+            fixture.ApplicationPath,
+            fixture.LegendsDirectory);
+        Assert.Equal("Enhanced EverQuest (SpinFOURKAYYY).lnk", enhanced.FileName);
+        Assert.Equal(StartupCommandLine.PlayEnhancedArgument, enhanced.Arguments);
+
+        // The two shortcuts must never collide on one desktop.
+        Assert.False(
+            string.Equals(
+                normal.FileName,
+                enhanced.FileName,
+                StringComparison.OrdinalIgnoreCase),
+            "The normal and enhanced shortcuts share one file name.");
+
+        // Without an installed client the shortcut still gets a real icon file
+        // rather than a dangling reference.
+        DesktopShortcutPlan missingClient = DesktopShortcutPlan.Create(
+            DesktopShortcutKind.NormalPlay,
+            fixture.ApplicationPath,
+            Path.Combine(temp.Path, "Not Installed"));
+        Assert.Equal(fixture.ApplicationPath, missingClient.IconPath);
+        Assert.False(missingClient.UsesLegendsIcon);
+        Assert.Equal(
+            fixture.ApplicationPath,
+            DesktopShortcutPlan.Create(
+                DesktopShortcutKind.NormalPlay,
+                fixture.ApplicationPath,
+                null).IconPath);
+
+        // A shortcut is never planned for an application that is not there.
+        _ = Assert.Throws<FileNotFoundException>(
+            () => DesktopShortcutPlan.Create(
+                DesktopShortcutKind.NormalPlay,
+                Path.Combine(fixture.ApplicationDirectory, "Missing.exe"),
+                fixture.LegendsDirectory));
+        _ = Assert.Throws<ArgumentException>(
+            () => DesktopShortcutPlan.Create(
+                DesktopShortcutKind.NormalPlay,
+                "   ",
+                fixture.LegendsDirectory));
+        _ = Assert.Throws<ArgumentOutOfRangeException>(
+            () => DesktopShortcutPlan.Create(
+                (DesktopShortcutKind)7,
+                fixture.ApplicationPath,
+                fixture.LegendsDirectory));
+
+        Assert.Equal(
+            Path.Combine(temp.Path, normal.FileName),
+            normal.ResolveDestinationPath(temp.Path));
+    }
+
+    private static async Task WindowsShortcutVerifiedRoundTripAsync()
+    {
+        await using TempDirectory temp = new();
+        ShortcutFixture fixture = await ShortcutFixture.CreateAsync(temp.Path)
+            .ConfigureAwait(false);
+        string desktop = Path.Combine(temp.Path, "Desktop");
+        Directory.CreateDirectory(desktop);
+
+        // The shell's shortcut component is apartment-threaded, and the
+        // application always calls it from the WPF UI thread. Exercising it on
+        // an STA thread keeps the test on the same path as production.
+        await RunOnStaThreadAsync(() =>
+        {
+            DesktopShortcutPlan plan = DesktopShortcutPlan.Create(
+                DesktopShortcutKind.EnhancedPlay,
+                fixture.ApplicationPath,
+                fixture.LegendsDirectory);
+            string shortcutPath = plan.ResolveDestinationPath(desktop);
+
+            WindowsShortcutSnapshot saved =
+                WindowsShortcutService.Save(plan, shortcutPath);
+            Assert.True(
+                File.Exists(shortcutPath),
+                "The shortcut file was not created.");
+            Assert.Equal(fixture.ApplicationPath, saved.TargetPath);
+            Assert.Equal(StartupCommandLine.PlayEnhancedArgument, saved.Arguments);
+            Assert.Equal(fixture.ApplicationDirectory, saved.WorkingDirectory);
+            Assert.Equal(fixture.EqGamePath, saved.IconPath);
+            Assert.Equal(0, saved.IconIndex);
+            Assert.Equal(plan.Description, saved.Description);
+
+            WindowsShortcutSnapshot reread =
+                WindowsShortcutService.Read(shortcutPath);
+            Assert.Equal(saved.TargetPath, reread.TargetPath);
+            Assert.Equal(saved.Arguments, reread.Arguments);
+            Assert.Equal(saved.IconPath, reread.IconPath);
+
+            // Replacing an existing shortcut leaves exactly one file behind.
+            _ = WindowsShortcutService.Save(plan, shortcutPath);
+            Assert.Equal(1, Directory.GetFiles(desktop).Length);
+
+            // A missing destination folder refuses instead of creating one.
+            _ = Assert.Throws<DirectoryNotFoundException>(
+                () => WindowsShortcutService.Save(
+                    plan,
+                    Path.Combine(temp.Path, "No Such Folder", plan.FileName)));
+            _ = Assert.Throws<FileNotFoundException>(
+                () => WindowsShortcutService.Read(
+                    Path.Combine(desktop, "missing.lnk")));
+        }).ConfigureAwait(false);
+    }
+
+    private static Task RunOnStaThreadAsync(Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        TaskCompletionSource completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Thread thread = new(() =>
+        {
+            try
+            {
+                action();
+                completion.SetResult();
+            }
+            catch (Exception exception)
+            {
+                completion.SetException(exception);
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return completion.Task;
+    }
 }
 
 internal sealed class TestRunner
@@ -9585,6 +9793,35 @@ internal sealed class TempDirectory : IAsyncDisposable
         }
 
         return ValueTask.CompletedTask;
+    }
+}
+
+internal sealed record ShortcutFixture(
+    string ApplicationDirectory,
+    string ApplicationPath,
+    string LegendsDirectory,
+    string EqGamePath)
+{
+    public static async Task<ShortcutFixture> CreateAsync(string root)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(root);
+        string applicationDirectory = Path.Combine(root, "SpinFOURKAYYY");
+        Directory.CreateDirectory(applicationDirectory);
+        string applicationPath =
+            Path.Combine(applicationDirectory, "SpinFOURKAYYY.exe");
+        await File.WriteAllTextAsync(applicationPath, "application")
+            .ConfigureAwait(false);
+
+        string legendsDirectory = Path.Combine(root, "EverQuest Legends");
+        Directory.CreateDirectory(legendsDirectory);
+        string eqGamePath = Path.Combine(legendsDirectory, "eqgame.exe");
+        await File.WriteAllTextAsync(eqGamePath, "client").ConfigureAwait(false);
+
+        return new ShortcutFixture(
+            applicationDirectory,
+            applicationPath,
+            legendsDirectory,
+            eqGamePath);
     }
 }
 
