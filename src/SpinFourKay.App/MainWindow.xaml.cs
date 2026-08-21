@@ -242,7 +242,10 @@ public partial class MainWindow : Window, IDisposable
         StartupCommandLine startup = App.StartupSwitches;
         if (startup.AutoPlayRejection is { } rejection)
         {
-            SetStatus(StatusTone.Warning, "SHORTCUT NOT UNDERSTOOD", rejection);
+            AnnounceRefusedAutoPlay(
+                "SHORTCUT NOT UNDERSTOOD",
+                "SpinFOURKAYYY did not start the game",
+                rejection);
             return;
         }
 
@@ -257,9 +260,9 @@ public partial class MainWindow : Window, IDisposable
         if (!PrepareLaunchButton.IsEnabled)
         {
             AdvancedExpander.IsExpanded = true;
-            SetStatus(
-                StatusTone.Warning,
+            AnnounceRefusedAutoPlay(
                 "AUTOMATIC START SKIPPED",
+                "SpinFOURKAYYY did not start the game",
                 DescribeAutoPlayBlock());
             return;
         }
@@ -275,9 +278,9 @@ public partial class MainWindow : Window, IDisposable
                     : PathLocator.FindSpinTextureExecutable();
             if (spinTexturePath is null)
             {
-                SetStatus(
-                    StatusTone.Warning,
+                AnnounceRefusedAutoPlay(
                     "SPINTEXTURE NOT SET UP YET",
+                    "SpinFOURKAYYY needs SpinTexture first",
                     "The enhanced shortcut needs SpinTexture. Use Play Enhanced "
                         + "EQ here once and choose SpinTexture.exe from its fully "
                         + "extracted folder; the shortcut works from then on. "
@@ -306,6 +309,31 @@ public partial class MainWindow : Window, IDisposable
                 FourKayGameStartMode.OfficialLauncher,
                 launchTargetPath: null,
                 token)).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Reports a refused unattended start. A shortcut is usually opened by
+    /// someone who has already looked away, so the refusal is raised in front
+    /// of them rather than left as a line in a window they are not watching.
+    /// </summary>
+    private void AnnounceRefusedAutoPlay(
+        string heading,
+        string title,
+        string message)
+    {
+        SetStatus(StatusTone.Warning, heading, message);
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        _ = Activate();
+        _ = MessageBox.Show(
+            this,
+            message,
+            title,
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
     }
 
     /// <summary>

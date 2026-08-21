@@ -69,7 +69,7 @@ Choose **Make Shortcut** in the top-right corner to put a one-click shortcut on 
 
 Either shortcut opens SpinFOURKAYYY and begins your last used setup immediately, with the same folder, display, size, quality, UI and overlay choices you had saved. The shortcut shows the EverQuest Legends icon from your own installed client, so no game artwork is copied onto your computer. If no Legends folder is selected yet, the SpinFOURKAYYY icon is used instead.
 
-If SpinFOURKAYYY cannot use your saved settings, it opens normally and explains what needs attention instead of starting the game. The enhanced shortcut needs SpinTexture chosen once through **Play Enhanced EQ** before it will work. SpinFOURKAYYY still runs one at a time, so close it before using a shortcut.
+If SpinFOURKAYYY cannot use your saved settings, it opens normally and tells you what needs attention instead of starting the game. The enhanced shortcut needs SpinTexture chosen once through **Play Enhanced EQ** before it will work. SpinFOURKAYYY still runs one at a time, so close it before using a shortcut.
 
 You can also start SpinFOURKAYYY with `--play` or `--play-enhanced` yourself; the shortcuts simply save you from typing them.
 
