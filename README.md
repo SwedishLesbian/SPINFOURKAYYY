@@ -44,6 +44,8 @@ It works with the default UI, custom interfaces, and character-specific layouts.
 4. Click **Start EverQuest for me**, then patch and sign in through the normal launcher.
 5. Keep SpinFOURKAYYY open while playing and exit EverQuest normally when finished.
 
+Once your settings feel right, use **Make Shortcut** to put a one-click EverQuest shortcut on your desktop.
+
 Your first launch at a new size may take a moment while the app prepares a matching copy of your current layout. After that, you can play normally and move windows or edit hotbars as usual. Those layout changes are saved for that size when the game closes.
 
 The next time you open SpinFOURKAYYY, your last setup is ready to use again.
@@ -51,6 +53,8 @@ The next time you open SpinFOURKAYYY, your last setup is ready to use again.
 ## Automatic updates
 
 SpinFOURKAYYY checks the latest completed GitHub Release when it opens. When a newer stable version is available, the app clearly offers to download and safely verify it before anything closes.
+
+When you start from a desktop shortcut, SpinFOURKAYYY still shows that an update is available but never interrupts the launch to ask about it. Use **Install update** whenever it suits you.
 
 Choose **Install update** after EverQuest is closed. SpinFOURKAYYY keeps your saved settings in place, replaces only files owned by the app, reopens the new version automatically, and confirms the installed version. You can also use **Check updates** in the top-right corner at any time.
 
@@ -108,6 +112,7 @@ All three are optional. SpinFOURKAYYY still works with the default interface, cu
 ## Helpful notes
 
 - EverQuest must be closed before starting a new managed session.
+- Close SpinFOURKAYYY before opening a desktop shortcut; only one copy runs at a time.
 - Extract the release completely; do not run it from inside the ZIP.
 - Keep `SpinFOURKAYYY.exe` and the included `Engine` folder together.
 - Administrator access is not required or recommended.
