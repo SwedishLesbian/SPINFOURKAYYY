@@ -1835,7 +1835,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
         IReadOnlyList<MagpieRunningInstance> instances =
             _magpieProcess.InspectRunningInstances(magpieDirectory);
         MagpieRunningInstance[] external = instances
-            .Where(instance => !instance.IsBundledInstance)
+            .Where(instance => instance.IsForeignInstance)
             .ToArray();
         if (external.Length > 0)
         {
@@ -1855,7 +1855,7 @@ public sealed class FourKayLaunchService : IFourKayLaunchService
         IReadOnlyList<MagpieRunningInstance> instances =
             _magpieProcess.InspectRunningInstances(magpieDirectory);
         MagpieRunningInstance[] external = instances
-            .Where(instance => !instance.IsBundledInstance)
+            .Where(instance => instance.IsForeignInstance)
             .ToArray();
         if (external.Length > 0)
         {

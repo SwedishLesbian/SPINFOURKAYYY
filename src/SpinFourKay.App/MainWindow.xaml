@@ -56,54 +56,64 @@
                                Foreground="{StaticResource MutedTextBrush}"
                                Text="Readable EverQuest - simple 1% sizing for any UI" />
                 </StackPanel>
-                <StackPanel Grid.Column="2"
-                            VerticalAlignment="Center"
-                            Orientation="Horizontal">
-                    <Button x:Name="MakeShortcutButton"
-                            MinHeight="40"
-                            Margin="0,0,7,0"
-                            Padding="13,7"
-                            AutomationProperties.Name="Make a desktop shortcut"
-                            AutomationProperties.HelpText="Opens a menu with a normal and an enhanced desktop shortcut that start EverQuest with your saved SpinFOURKAYYY choices."
-                            ToolTip="Put a shortcut on your desktop that plays with your saved choices"
-                            Style="{StaticResource QuietButton}"
-                            Click="MakeShortcut_Click"
-                            Content="Make Shortcut">
-                        <Button.ContextMenu>
-                            <ContextMenu x:Name="MakeShortcutMenu"
-                                         MinWidth="288"
-                                         Style="{StaticResource ShortcutMenu}">
-                                <MenuItem x:Name="MakeNormalShortcutMenuItem"
-                                          AutomationProperties.HelpText="Creates a desktop shortcut that starts EverQuest through the normal launcher with your saved choices."
-                                          Style="{StaticResource ShortcutMenuItem}"
-                                          Click="MakeNormalShortcut_Click"
-                                          Header="Make EverQuest Shortcut" />
-                                <MenuItem x:Name="MakeEnhancedShortcutMenuItem"
-                                          AutomationProperties.HelpText="Creates a desktop shortcut that starts the enhanced texture pack through SpinTexture with your saved choices."
-                                          Style="{StaticResource ShortcutMenuItem}"
-                                          Click="MakeEnhancedShortcut_Click"
-                                          Header="Make Enhanced EverQuest Shortcut" />
-                            </ContextMenu>
-                        </Button.ContextMenu>
-                    </Button>
-                    <Button x:Name="CheckUpdatesButton"
-                            MinHeight="40"
-                            Margin="0,0,7,0"
-                            Padding="13,7"
-                            AutomationProperties.Name="Check for SpinFOURKAYYY updates"
-                            AutomationProperties.HelpText="Checks the latest completed GitHub Release for a newer verified SpinFOURKAYYY package."
-                            ToolTip="Check the latest completed GitHub Release"
-                            Style="{StaticResource QuietButton}"
-                            Click="CheckUpdates_Click"
-                            Content="Check updates" />
-                    <Button MinHeight="40"
-                            Padding="13,7"
-                            AutomationProperties.Name="Open SpinUI GitHub repository"
-                            AutomationProperties.HelpText="Opens the optional SpinUI repository in your default browser."
-                            ToolTip="Open the optional SpinUI project"
-                            Style="{StaticResource QuietButton}"
-                            Click="OpenSpinUi_Click"
-                            Content="SpinUI GitHub" />
+                <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                    <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
+                        <Button x:Name="MakeShortcutButton"
+                                MinHeight="40"
+                                Margin="0,0,7,0"
+                                Padding="13,7"
+                                AutomationProperties.Name="Make a desktop shortcut"
+                                AutomationProperties.HelpText="Opens a menu with a normal and an enhanced desktop shortcut that start EverQuest with your saved SpinFOURKAYYY choices."
+                                ToolTip="Put a shortcut on your desktop that plays with your saved choices"
+                                Style="{StaticResource QuietButton}"
+                                Click="MakeShortcut_Click"
+                                Content="Make Shortcut">
+                            <Button.ContextMenu>
+                                <ContextMenu x:Name="MakeShortcutMenu"
+                                             MinWidth="288"
+                                             Style="{StaticResource ShortcutMenu}">
+                                    <MenuItem x:Name="MakeNormalShortcutMenuItem"
+                                              AutomationProperties.HelpText="Creates a desktop shortcut that starts EverQuest through the normal launcher with your saved choices."
+                                              Style="{StaticResource ShortcutMenuItem}"
+                                              Click="MakeNormalShortcut_Click"
+                                              Header="Make EverQuest Shortcut" />
+                                    <MenuItem x:Name="MakeEnhancedShortcutMenuItem"
+                                              AutomationProperties.HelpText="Creates a desktop shortcut that starts the enhanced texture pack through SpinTexture with your saved choices."
+                                              Style="{StaticResource ShortcutMenuItem}"
+                                              Click="MakeEnhancedShortcut_Click"
+                                              Header="Make Enhanced EverQuest Shortcut" />
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
+                        <Button x:Name="CheckUpdatesButton"
+                                MinHeight="40"
+                                Margin="0,0,7,0"
+                                Padding="13,7"
+                                AutomationProperties.Name="Check for SpinFOURKAYYY updates"
+                                AutomationProperties.HelpText="Checks the latest completed GitHub Release for a newer verified SpinFOURKAYYY package."
+                                ToolTip="Check the latest completed GitHub Release"
+                                Style="{StaticResource QuietButton}"
+                                Click="CheckUpdates_Click"
+                                Content="Check updates" />
+                        <Button MinHeight="40"
+                                Padding="13,7"
+                                AutomationProperties.Name="Open SpinUI GitHub repository"
+                                AutomationProperties.HelpText="Opens the optional SpinUI repository in your default browser."
+                                ToolTip="Open the optional SpinUI project"
+                                Style="{StaticResource QuietButton}"
+                                Click="OpenSpinUi_Click"
+                                Content="SpinUI GitHub" />
+                    </StackPanel>
+                    <CheckBox x:Name="CloseConflictingMagpieCheckBox"
+                              Margin="0,7,2,0"
+                              HorizontalAlignment="Right"
+                              FontSize="12"
+                              AutomationProperties.Name="Close a separately installed Magpie for me"
+                              AutomationProperties.HelpText="When a separately installed Magpie blocks a launch, SpinFOURKAYYY asks it to quit normally instead of asking you each time."
+                              ToolTip="Only affects a separately installed Magpie. SpinFOURKAYYY always manages its own scaling engine."
+                              Checked="CloseConflictingMagpie_Changed"
+                              Unchecked="CloseConflictingMagpie_Changed"
+                              Content="Close other Magpie for me" />
                 </StackPanel>
             </Grid>
         </Border>

@@ -93,6 +93,12 @@ internal static class Program
             "Shortcuts / verified .lnk round trip and refusals",
             WindowsShortcutVerifiedRoundTripAsync);
         runner.Add(
+            "Engine runtime / superseded instances are not foreign Magpie",
+            SupersededEngineInstancesAreNotForeign);
+        runner.Add(
+            "Engine runtime / superseded folders pruned, live ones retained",
+            SupersededEngineRuntimePruningAsync);
+        runner.Add(
             "Updates / GitHub release discovery and verified staging",
             UpdateDiscoveryAndVerifiedStagingAsync);
         runner.Add(
@@ -1327,6 +1333,7 @@ internal static class Program
             AntiAliasing = AntiAliasingMode.Smaa,
             ClarityPercent = 15,
             MaintainTopmostOverlays = false,
+            CloseConflictingMagpieAutomatically = true,
             UiCompatibilityMode = FourKayUiCompatibilityMode.SpinUiStrict,
             SpinUiPresetIndex = 1,
         };
@@ -1355,6 +1362,10 @@ internal static class Program
         Assert.Equal(AntiAliasingMode.Smaa, loaded.Preferences.AntiAliasing);
         Assert.Equal(15, loaded.Preferences.ClarityPercent);
         Assert.False(loaded.Preferences.MaintainTopmostOverlays);
+        Assert.True(loaded.Preferences.CloseConflictingMagpieAutomatically);
+        // Closing a Magpie the user started must never be the silent default.
+        Assert.False(missing.Preferences.CloseConflictingMagpieAutomatically);
+        Assert.False(UserPreferences.Default.CloseConflictingMagpieAutomatically);
         Assert.Equal(
             FourKayUiCompatibilityMode.SpinUiStrict,
             loaded.Preferences.UiCompatibilityMode);
@@ -9372,6 +9383,166 @@ internal static class Program
         }
 
         return count;
+    }
+
+    private static void SupersededEngineInstancesAreNotForeign()
+    {
+        // The engine is provisioned per application version, so updating moves
+        // the path Magpie runs from. A copy left in the tray by the previous
+        // version must be recognised as this application's own engine.
+        const string root = @"C:\Users\Player\AppData\Local\SpinFOURKAYYY\engine-runtime";
+        string current = Path.Combine(root, "app-1.0.7-magpie-0.12.1", "Magpie.exe");
+        string previous = Path.Combine(root, "app-1.0.6-magpie-0.12.1", "Magpie.exe");
+
+        Assert.Equal(
+            MagpieInstanceOrigin.BundledCurrent,
+            MagpieProcessService.ClassifyOrigin(current, current, root));
+        Assert.Equal(
+            MagpieInstanceOrigin.OwnPreviousRuntime,
+            MagpieProcessService.ClassifyOrigin(previous, current, root));
+
+        // Casing must not change the verdict; Windows paths are not case
+        // sensitive and the upgrade path routinely varies it.
+        Assert.Equal(
+            MagpieInstanceOrigin.OwnPreviousRuntime,
+            MagpieProcessService.ClassifyOrigin(
+                previous.ToUpperInvariant(),
+                current,
+                root));
+
+        // A real separate installation stays foreign and still needs consent.
+        Assert.Equal(
+            MagpieInstanceOrigin.Foreign,
+            MagpieProcessService.ClassifyOrigin(
+                @"C:\Program Files\Magpie\Magpie.exe",
+                current,
+                root));
+
+        // A sibling of the runtime root is not inside it.
+        Assert.Equal(
+            MagpieInstanceOrigin.Foreign,
+            MagpieProcessService.ClassifyOrigin(
+                @"C:\Users\Player\AppData\Local\SpinFOURKAYYY\somewhere-else\Magpie.exe",
+                current,
+                root));
+
+        // A folder inside the runtime root that is not a provisioned runtime
+        // name is not ours either.
+        Assert.Equal(
+            MagpieInstanceOrigin.Foreign,
+            MagpieProcessService.ClassifyOrigin(
+                Path.Combine(root, "unrelated", "Magpie.exe"),
+                current,
+                root));
+
+        // An unreadable path must never be closed without asking.
+        Assert.Equal(
+            MagpieInstanceOrigin.Foreign,
+            MagpieProcessService.ClassifyOrigin(null, current, root));
+        Assert.Equal(
+            MagpieInstanceOrigin.Foreign,
+            MagpieProcessService.ClassifyOrigin("   ", current, root));
+        Assert.Equal(
+            MagpieInstanceOrigin.Foreign,
+            MagpieProcessService.ClassifyOrigin(previous, current, null));
+
+        // The origin drives which instances need consent.
+        MagpieRunningInstance superseded = new(4321, previous, false)
+        {
+            Origin = MagpieInstanceOrigin.OwnPreviousRuntime,
+        };
+        Assert.True(superseded.IsSupersededOwnRuntime);
+        Assert.False(superseded.IsForeignInstance);
+        Assert.False(superseded.IsBundledInstance);
+
+        // Callers that only know the old boolean keep their previous meaning.
+        Assert.True(
+            new MagpieRunningInstance(1, previous, IsBundledInstance: false)
+                .IsForeignInstance);
+        Assert.Equal(
+            MagpieInstanceOrigin.BundledCurrent,
+            new MagpieRunningInstance(1, current, IsBundledInstance: true).Origin);
+
+        Assert.True(
+            MagpieRuntimeProvisioner.IsRuntimeDirectoryName("app-1.0.7-magpie-0.12.1"));
+        Assert.False(MagpieRuntimeProvisioner.IsRuntimeDirectoryName("backups"));
+        Assert.False(
+            MagpieRuntimeProvisioner.IsRuntimeDirectoryName(
+                ".app-1.0.7-magpie-0.12.1.pending-abc"));
+        Assert.False(MagpieRuntimeProvisioner.IsRuntimeDirectoryName(null));
+    }
+
+    private static async Task SupersededEngineRuntimePruningAsync()
+    {
+        await using TempDirectory temp = new();
+        string root = Path.Combine(temp.Path, "engine-runtime");
+        const string currentKey = "app-1.0.7-magpie-0.12.1";
+        string[] created =
+        [
+            currentKey,
+            "app-1.0.5-magpie-0.12.1",
+            "app-1.0.6-magpie-0.12.1",
+            "backups",
+            ".app-1.0.7-magpie-0.12.1.broken-abc",
+        ];
+        foreach (string name in created)
+        {
+            Directory.CreateDirectory(Path.Combine(root, name));
+            await File.WriteAllTextAsync(
+                Path.Combine(root, name, "Magpie.exe"),
+                "engine").ConfigureAwait(false);
+        }
+
+        string liveRuntime = Path.Combine(root, "app-1.0.6-magpie-0.12.1");
+        IReadOnlyList<string> removed =
+            MagpieRuntimeProvisioner.PruneSupersededRuntimes(
+                root,
+                currentKey,
+                candidate => string.Equals(
+                    Path.TrimEndingDirectorySeparator(candidate),
+                    liveRuntime,
+                    StringComparison.OrdinalIgnoreCase));
+
+        // Only the superseded runtime with no live engine is removed.
+        Assert.Equal(1, removed.Count);
+        Assert.Equal(
+            Path.Combine(root, "app-1.0.5-magpie-0.12.1"),
+            Path.TrimEndingDirectorySeparator(removed[0]));
+
+        Assert.True(
+            Directory.Exists(Path.Combine(root, currentKey)),
+            "The current runtime must never be pruned.");
+        Assert.True(
+            Directory.Exists(liveRuntime),
+            "A runtime with a live engine must be left completely alone.");
+        Assert.True(
+            File.Exists(Path.Combine(liveRuntime, "Magpie.exe")),
+            "A live runtime must not be partially deleted.");
+        Assert.True(
+            Directory.Exists(Path.Combine(root, "backups")),
+            "Unrelated folders must not be touched.");
+        Assert.True(
+            Directory.Exists(Path.Combine(root, ".app-1.0.7-magpie-0.12.1.broken-abc")),
+            "Quarantine folders are not runtimes and must not be pruned here.");
+        Assert.False(Directory.Exists(Path.Combine(root, "app-1.0.5-magpie-0.12.1")));
+
+        // The in-use predicate is the only thing protecting that runtime: once
+        // its engine is gone, the next run removes it.
+        IReadOnlyList<string> afterEngineExit =
+            MagpieRuntimeProvisioner.PruneSupersededRuntimes(root, currentKey);
+        Assert.Equal(1, afterEngineExit.Count);
+        Assert.False(Directory.Exists(liveRuntime));
+        Assert.True(Directory.Exists(Path.Combine(root, currentKey)));
+
+        // With nothing superseded left, further runs are a no-op, not an error.
+        Assert.Empty(
+            MagpieRuntimeProvisioner.PruneSupersededRuntimes(root, currentKey));
+
+        // A missing root is not an error either.
+        Assert.Empty(
+            MagpieRuntimeProvisioner.PruneSupersededRuntimes(
+                Path.Combine(temp.Path, "no-such-root"),
+                currentKey));
     }
 
     private static void StartupSwitchInterpretation()

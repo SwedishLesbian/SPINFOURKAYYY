@@ -36,6 +36,14 @@ public sealed record UserPreferences
 
     public bool MaintainTopmostOverlays { get; init; } = true;
 
+    /// <summary>
+    /// When true, a separately installed Magpie found blocking a launch is
+    /// closed without asking each time. The preference is the consent: closing
+    /// a process the user started is never done on a silent default, so this
+    /// stays off unless it is deliberately turned on.
+    /// </summary>
+    public bool CloseConflictingMagpieAutomatically { get; init; }
+
     public FourKayUiCompatibilityMode UiCompatibilityMode { get; init; } =
         FourKayUiCompatibilityMode.GenericOrCustom;
 

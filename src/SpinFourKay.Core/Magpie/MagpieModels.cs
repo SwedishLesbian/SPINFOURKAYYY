@@ -115,18 +115,64 @@ public sealed record MagpieProcessStartResult(
     System.Diagnostics.Process Process,
     bool AlreadyRunning);
 
+/// <summary>
+/// Where a running Magpie process came from. The engine is provisioned into an
+/// app-version-specific runtime folder, so an instance left in the tray by a
+/// previous SpinFOURKAYYY version lives at a different path than the current
+/// one and must not be mistaken for a separately installed Magpie.
+/// </summary>
+public enum MagpieInstanceOrigin
+{
+    /// <summary>Running from the runtime this SpinFOURKAYYY version owns.</summary>
+    BundledCurrent = 0,
+
+    /// <summary>
+    /// Running from a SpinFOURKAYYY engine runtime belonging to a different app
+    /// version. Still this application's own engine, just a superseded copy.
+    /// </summary>
+    OwnPreviousRuntime = 1,
+
+    /// <summary>A Magpie this application did not provision.</summary>
+    Foreign = 2,
+}
+
 public sealed record MagpieRunningInstance(
     int ProcessId,
     string? ExecutablePath,
-    bool IsBundledInstance);
+    bool IsBundledInstance)
+{
+    /// <summary>
+    /// Where this instance came from. Defaults from
+    /// <see cref="IsBundledInstance"/> so callers that only know whether an
+    /// instance is the current one keep their previous meaning.
+    /// </summary>
+    public MagpieInstanceOrigin Origin { get; init; } = IsBundledInstance
+        ? MagpieInstanceOrigin.BundledCurrent
+        : MagpieInstanceOrigin.Foreign;
+
+    /// <summary>
+    /// True when this is a SpinFOURKAYYY engine from a superseded app version.
+    /// These may be shut down as routine housekeeping; they are not a foreign
+    /// Magpie the user chose to install and run.
+    /// </summary>
+    public bool IsSupersededOwnRuntime =>
+        Origin == MagpieInstanceOrigin.OwnPreviousRuntime;
+
+    /// <summary>
+    /// True only for a Magpie this application did not provision, which is the
+    /// one case that needs the user's permission before being closed.
+    /// </summary>
+    public bool IsForeignInstance => Origin == MagpieInstanceOrigin.Foreign;
+}
 
 public sealed class ExternalMagpieInstanceConflictException : InvalidOperationException
 {
     public ExternalMagpieInstanceConflictException(
         IReadOnlyList<MagpieRunningInstance> conflictingInstances)
         : base(
-            "Another Magpie instance is already running. Close it before starting "
-            + "SpinFOURKAYYY so the dedicated portable profile can load.")
+            "A separately installed Magpie is already running. It was left alone. "
+            + "Close it, or let SpinFOURKAYYY close it for you, so the dedicated "
+            + "portable profile can load.")
     {
         ConflictingInstances = conflictingInstances;
     }

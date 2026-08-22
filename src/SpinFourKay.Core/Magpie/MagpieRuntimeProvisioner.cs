@@ -148,6 +148,97 @@ public static class MagpieRuntimeProvisioner
         }
     }
 
+    /// <summary>
+    /// True when <paramref name="directoryName"/> is one of this application's
+    /// provisioned engine runtime folders, such as
+    /// <c>app-1.0.7-magpie-0.12.1</c>. Quarantine folders are excluded because
+    /// they are prefixed with a dot.
+    /// </summary>
+    public static bool IsRuntimeDirectoryName(string? directoryName) =>
+        !string.IsNullOrWhiteSpace(directoryName)
+        && directoryName.StartsWith("app-", StringComparison.OrdinalIgnoreCase)
+        && directoryName.Contains("-magpie-", StringComparison.OrdinalIgnoreCase)
+        && directoryName.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+
+    /// <summary>
+    /// Removes engine runtimes left behind by superseded application versions
+    /// and returns the folders that were deleted.
+    /// </summary>
+    /// <param name="runtimeRoot">The engine-runtime folder to tidy.</param>
+    /// <param name="currentRuntimeKey">The runtime that must be preserved.</param>
+    /// <param name="isInUse">
+    /// Reports whether a runtime folder still has a live process. A runtime in
+    /// use is skipped entirely: a recursive delete could otherwise remove the
+    /// shader files of a running engine before failing on its locked
+    /// executable, leaving that engine broken while it is still scaling.
+    /// </param>
+    /// <remarks>
+    /// This is best-effort housekeeping. A runtime that cannot be removed is
+    /// left in place and reported as retained rather than failing the caller,
+    /// because a stale folder costs disk space and nothing else. Deleting one is
+    /// safe: the next launch re-provisions from the bundled engine on demand.
+    /// </remarks>
+    public static IReadOnlyList<string> PruneSupersededRuntimes(
+        string runtimeRoot,
+        string currentRuntimeKey,
+        Func<string, bool>? isInUse = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runtimeRoot);
+        ValidateRuntimeKey(currentRuntimeKey);
+
+        string root = Path.GetFullPath(runtimeRoot);
+        if (!Directory.Exists(root))
+        {
+            return [];
+        }
+
+        List<string> removed = [];
+        lock (ProvisionLock)
+        {
+            string[] candidates;
+            try
+            {
+                candidates = Directory.GetDirectories(root);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                return [];
+            }
+
+            foreach (string candidate in candidates)
+            {
+                string name = Path.GetFileName(candidate);
+                if (!IsRuntimeDirectoryName(name)
+                    || string.Equals(
+                        name,
+                        currentRuntimeKey,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (isInUse is not null && isInUse(candidate))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    Directory.Delete(candidate, recursive: true);
+                    removed.Add(candidate);
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    // Retained on purpose; see the remarks above.
+                }
+            }
+        }
+
+        return removed;
+    }
+
     private static void CopyImmutableRuntime(string source, string destination)
     {
         Directory.CreateDirectory(destination);

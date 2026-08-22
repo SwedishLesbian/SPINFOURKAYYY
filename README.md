@@ -116,8 +116,16 @@ All three are optional. SpinFOURKAYYY still works with the default interface, cu
 - Extract the release completely; do not run it from inside the ZIP.
 - Keep `SpinFOURKAYYY.exe` and the included `Engine` folder together.
 - Administrator access is not required or recommended.
-- Close any separately installed copy of Magpie before launching.
+- Close any separately installed copy of Magpie before launching, or tick **Close other Magpie for me** and SpinFOURKAYYY will ask it to quit for you.
 - If a session is interrupted, reopen SpinFOURKAYYY and let it finish recovery.
+
+## The scaling engine
+
+SpinFOURKAYYY brings its own copy of the Magpie scaling engine and keeps it in its own folder, separate from any Magpie you may have installed yourself. You never need to install, update, or start it.
+
+Because each SpinFOURKAYYY version keeps its own copy, an engine left running by a previous version is closed and tidied away automatically the next time you open the app. Your settings and EverQuest files are not touched.
+
+If you *have* installed Magpie separately and it is running, SpinFOURKAYYY cannot start its own copy, because Magpie allows only one at a time. It will offer to close yours, asking it to quit normally just as its tray icon would. Tick **Close other Magpie for me** in the top-right corner to have it do that without asking each time. It is off until you turn it on, and it never affects anything other than Magpie.
 
 ## Compatibility
 

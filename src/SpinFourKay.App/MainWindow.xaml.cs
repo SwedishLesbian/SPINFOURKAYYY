@@ -39,6 +39,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly FourKayJournalStore _journalStore = new();
     private readonly UiLayoutProfileService _layoutProfileService = new();
     private readonly MagpieScalingWindowInspector _scalingInspector = new();
+    private readonly MagpieProcessService _magpieProcess = new();
     private readonly ProcessDiscoveryService _processDiscovery = new();
     private readonly WindowDiscoveryService _windowDiscovery = new();
     private readonly ForegroundWindowService _foregroundWindow = new();
@@ -84,6 +85,7 @@ public partial class MainWindow : Window, IDisposable
     private bool _isUpdatingPresetCards;
     private bool _startupRunningGameDetectionAttempted;
     private bool _autoPlayAttempted;
+    private string? _engineTidySummary;
     private bool _preferencesReady;
     private string? _lastValidLegendsDirectory;
     private string? _spinTextureExecutablePath;
@@ -187,6 +189,7 @@ public partial class MainWindow : Window, IDisposable
 
         PopulateDisplays(preferences.TargetDisplayBounds);
         ApplySavedPreferences(preferences);
+        await TidySupersededEngineRuntimesAsync().ConfigureAwait(true);
         _preferencesReady = true;
         RefreshDisplayAndPlan();
         await LoadRecoveryStateAsync().ConfigureAwait(true);
@@ -222,7 +225,97 @@ public partial class MainWindow : Window, IDisposable
             showCurrentVersionMessage: false,
             offerInstall: App.UpdatedFromVersion is null
                 && !App.StartupSwitches.RequestsAutoPlay).ConfigureAwait(true);
+        if (_engineTidySummary is { } tidySummary
+            && !App.StartupSwitches.RequestsAutoPlay)
+        {
+            SetStatus(StatusTone.Info, "SCALING ENGINE TIDIED", tidySummary);
+        }
+
         await TryStartRequestedAutoPlayAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Closes and removes scaling engines left behind by previous versions of
+    /// SpinFOURKAYYY.
+    /// </summary>
+    /// <remarks>
+    /// The engine is provisioned into an app-version-specific folder, so
+    /// updating SpinFOURKAYYY moves it. A Magpie left in the tray by the old
+    /// version would otherwise be reported as a separately installed Magpie the
+    /// user had to hunt down and close, which is confusing precisely because
+    /// they never installed one. Closing it is this application's own business.
+    /// </remarks>
+    private async Task TidySupersededEngineRuntimesAsync()
+    {
+        try
+        {
+            string magpieDirectory = PathLocator.FindMagpieDirectory();
+            string? runtimeRoot = Path.GetDirectoryName(magpieDirectory);
+            string currentRuntimeKey = Path.GetFileName(magpieDirectory);
+            if (string.IsNullOrWhiteSpace(runtimeRoot)
+                || string.IsNullOrWhiteSpace(currentRuntimeKey))
+            {
+                return;
+            }
+
+            IReadOnlyList<int> closed = await _magpieProcess
+                .ShutdownSupersededAsync(
+                    magpieDirectory,
+                    TimeSpan.FromSeconds(5),
+                    CancellationToken.None)
+                .ConfigureAwait(true);
+
+            // A runtime whose engine is still running must be left completely
+            // alone; a partial delete would strip a live engine's shaders.
+            HashSet<string> directoriesInUse = _magpieProcess
+                .InspectRunningInstances(magpieDirectory)
+                .Select(instance => instance.ExecutablePath)
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(path => Path.GetDirectoryName(path!))
+                .Where(directory => !string.IsNullOrWhiteSpace(directory))
+                .Select(directory =>
+                    Path.TrimEndingDirectorySeparator(directory!))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            IReadOnlyList<string> removed =
+                MagpieRuntimeProvisioner.PruneSupersededRuntimes(
+                    runtimeRoot,
+                    currentRuntimeKey,
+                    candidate => directoriesInUse.Contains(
+                        Path.TrimEndingDirectorySeparator(candidate)));
+
+            if (closed.Count == 0 && removed.Count == 0)
+            {
+                return;
+            }
+
+            List<string> parts = [];
+            if (closed.Count > 0)
+            {
+                parts.Add(
+                    $"Closed {closed.Count} scaling "
+                        + (closed.Count == 1 ? "engine" : "engines")
+                        + " left running by a previous SpinFOURKAYYY version");
+            }
+
+            if (removed.Count > 0)
+            {
+                parts.Add(
+                    $"removed {removed.Count} superseded engine "
+                        + (removed.Count == 1 ? "folder" : "folders"));
+            }
+
+            _engineTidySummary = string.Join(" and ", parts)
+                + ". Your settings and EverQuest files were not touched.";
+        }
+        catch (Exception exception) when (
+            IsExpectedUserFacingFailure(exception)
+            || exception is DirectoryNotFoundException)
+        {
+            // Housekeeping never blocks startup. A missing or busy engine is
+            // reported by the normal readiness checks instead.
+            Debug.WriteLine("SpinFOURKAYYY engine tidy skipped: " + exception.Message);
+        }
     }
 
     /// <summary>
@@ -3029,6 +3122,8 @@ public partial class MainWindow : Window, IDisposable
             ClaritySlider.Value = preferences.ClarityPercent;
             OverlayCompatibilityCheckBox.IsChecked =
                 preferences.MaintainTopmostOverlays;
+            CloseConflictingMagpieCheckBox.IsChecked =
+                preferences.CloseConflictingMagpieAutomatically;
             bool strict = preferences.UiCompatibilityMode
                 == FourKayUiCompatibilityMode.SpinUiStrict;
             _lastSpinUiPresetIndex = preferences.SpinUiPresetIndex;
@@ -3074,6 +3169,8 @@ public partial class MainWindow : Window, IDisposable
                 MidpointRounding.AwayFromZero)),
             MaintainTopmostOverlays =
                 OverlayCompatibilityCheckBox.IsChecked == true,
+            CloseConflictingMagpieAutomatically =
+                CloseConflictingMagpieCheckBox.IsChecked == true,
             UiCompatibilityMode = SelectedUiCompatibilityMode,
             SpinUiPresetIndex = _lastSpinUiPresetIndex,
         };
@@ -3471,6 +3568,86 @@ public partial class MainWindow : Window, IDisposable
                 + "a recovery copy first).";
     }
 
+    /// <summary>
+    /// Asks whether a separately installed Magpie may be closed, and closes it
+    /// when the user agrees.
+    /// </summary>
+    /// <remarks>
+    /// This is the one case where SpinFOURKAYYY ends a process the user started
+    /// themselves, so it is never done without an explicit answer. Magpie is
+    /// asked to quit through its own message rather than terminated, so it exits
+    /// the same way it would from its tray icon.
+    /// </remarks>
+    private async Task<bool> TryCloseForeignMagpieAsync(
+        ExternalMagpieInstanceConflictException conflict)
+    {
+        string running = string.Join(
+            Environment.NewLine,
+            conflict.ConflictingInstances.Select(
+                instance => "    "
+                    + (instance.ExecutablePath
+                        ?? $"Magpie process {instance.ProcessId}")));
+        if (CloseConflictingMagpieCheckBox.IsChecked == true)
+        {
+            return await CloseForeignMagpieAsync().ConfigureAwait(true);
+        }
+
+        MessageBoxResult choice = MessageBox.Show(
+            this,
+            "A separately installed Magpie is running. SpinFOURKAYYY needs its "
+                + "own copy so the exact scaling profile for your chosen size can "
+                + "load, and Magpie allows only one copy at a time."
+                + Environment.NewLine
+                + Environment.NewLine
+                + running
+                + Environment.NewLine
+                + Environment.NewLine
+                + "Close it and continue? Magpie is asked to quit normally, the "
+                + "same as choosing Exit from its tray icon. Anything it is "
+                + "currently scaling will stop. Nothing else is changed.",
+            "Close the other Magpie?",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question,
+            MessageBoxResult.No);
+        if (choice != MessageBoxResult.Yes)
+        {
+            return false;
+        }
+
+        return await CloseForeignMagpieAsync().ConfigureAwait(true);
+    }
+
+    private async Task<bool> CloseForeignMagpieAsync()
+    {
+        SetStatus(
+            StatusTone.Working,
+            "CLOSING THE OTHER MAGPIE",
+            "Asking Magpie to quit normally, then continuing\u2026");
+        IReadOnlyList<int> closed = await _magpieProcess
+            .ShutdownAllConsentedAsync(
+                PathLocator.FindMagpieDirectory(),
+                TimeSpan.FromSeconds(8),
+                CancellationToken.None)
+            .ConfigureAwait(true);
+        if (closed.Count == 0)
+        {
+            ShowError(
+                "Magpie did not close",
+                "Magpie did not respond to a normal quit request, so nothing was "
+                    + "changed. Close it from its tray icon, then try again.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private void CloseConflictingMagpie_Changed(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        QueuePreferencesSave();
+    }
+
     private async Task RunOperationAsync(
         string heading,
         string message,
@@ -3500,7 +3677,26 @@ public partial class MainWindow : Window, IDisposable
                 await healthCheck.ConfigureAwait(true);
             }
 
-            await operation(_operationCancellation.Token).ConfigureAwait(true);
+            // A foreign Magpie blocks the dedicated profile from loading. Offer
+            // to close it rather than making the user hunt for a tray icon, then
+            // retry exactly once so a declined or failed shutdown still reports
+            // through the normal error path.
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await operation(_operationCancellation.Token).ConfigureAwait(true);
+                    break;
+                }
+                catch (ExternalMagpieInstanceConflictException conflict)
+                    when (attempt == 0)
+                {
+                    if (!await TryCloseForeignMagpieAsync(conflict).ConfigureAwait(true))
+                    {
+                        throw;
+                    }
+                }
+            }
         }
         catch (OperationCanceledException)
         {
