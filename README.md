@@ -125,6 +125,8 @@ SpinFOURKAYYY brings its own copy of the Magpie scaling engine and keeps it in i
 
 Because each SpinFOURKAYYY version keeps its own copy, an engine left running by a previous version is closed and tidied away automatically the next time you open the app. Your settings and EverQuest files are not touched.
 
+The engine only reads your size and quality choices when it starts, so if it is still running when you change them, SpinFOURKAYYY restarts it for you. You no longer need to close it yourself between sessions.
+
 If you *have* installed Magpie separately and it is running, SpinFOURKAYYY cannot start its own copy, because Magpie allows only one at a time. It will offer to close yours, asking it to quit normally just as its tray icon would. Tick **Close other Magpie for me** in the top-right corner to have it do that without asking each time. It is off until you turn it on, and it never affects anything other than Magpie.
 
 ## Compatibility

@@ -303,7 +303,7 @@ internal static class Program
             "Cleanup lease / changed rollback permission follows ownership",
             ChangedRollbackPermissionFollowsOwnershipAsync);
         runner.Add(
-            "Launch / bundled preflight refuses without shutdown or config",
+            "Launch / own engine restarted for a new profile, refused if it stays",
             BundledPreflightRefusesWithoutMutationAsync);
         runner.Add(
             "Cleanup / replacement after owned exit remains untouched",
@@ -8306,8 +8306,13 @@ internal static class Program
                 MagpieDirectory = @"C:\BundledMagpie",
                 Filter = ScalingFilter.Fsr,
             })).ConfigureAwait(false);
-        Assert.Equal(1, magpie.InspectCalls);
-        Assert.Equal(0, magpie.ShutdownCalls);
+        // Magpie loads its profile only at startup, so this application's own
+        // engine is asked to quit rather than the player being told to close it.
+        Assert.Equal(1, magpie.ShutdownCalls);
+
+        // Its absence is confirmed instead of assumed. This engine never goes
+        // away, so the launch still refuses and nothing at all is mutated.
+        Assert.Equal(2, magpie.InspectCalls);
         Assert.Equal(0, magpie.ShutdownExactCalls);
         Assert.Equal(0, magpie.StartCalls);
         Assert.Equal(0, config.PrepareCalls);
@@ -8317,6 +8322,89 @@ internal static class Program
         Assert.Equal(0, windows.InvocationCount);
         Assert.Equal(0, placement.PlacementCalls);
         Assert.Equal(0, inspector.InvocationCount);
+
+        // An engine that refuses to quit is reported rather than worked around.
+        FakeMagpiePortableConfigService stubbornConfig = new();
+        FakeMagpieProcessService stubbornMagpie = new()
+        {
+            ShutdownResult = false,
+            Instances =
+            [
+                new MagpieRunningInstance(
+                    7712,
+                    @"C:\BundledMagpie\Magpie.exe",
+                    IsBundledInstance: true),
+            ],
+        };
+        FakeScalingWindowInspector stubbornInspector = new();
+        await Assert.ThrowsAsync<DedicatedMagpieConfigReloadRequiredException>(
+            () => new FourKayLaunchService(
+                    new FakeProcessDiscoveryService(),
+                    new FakeWindowDiscoveryService(),
+                    FakeWindowPlacementService.Create4K(),
+                    stubbornConfig,
+                    stubbornMagpie,
+                    stubbornInspector)
+                .AttachExistingAsync(new FourKayAttachRequest
+                {
+                    EqDirectory = client.EqDirectory,
+                    MagpieDirectory = @"C:\BundledMagpie",
+                    Filter = ScalingFilter.Fsr,
+                })).ConfigureAwait(false);
+        Assert.Equal(1, stubbornMagpie.ShutdownCalls);
+
+        // A failed shutdown is terminal immediately; there is nothing to confirm.
+        Assert.Equal(1, stubbornMagpie.InspectCalls);
+        Assert.Equal(0, stubbornConfig.PrepareCalls);
+        Assert.Equal(0, stubbornConfig.WriteCalls);
+
+        // When the engine does go away, the launch proceeds past preflight and
+        // writes the new profile instead of stopping the player.
+        FakeMagpiePortableConfigService clearedConfig = new();
+        FakeMagpieProcessService clearedMagpie = new()
+        {
+            InspectionResults = new Queue<IReadOnlyList<MagpieRunningInstance>>(
+            [
+                [
+                    new MagpieRunningInstance(
+                        7713,
+                        @"C:\BundledMagpie\Magpie.exe",
+                        IsBundledInstance: true),
+                ],
+                Array.Empty<MagpieRunningInstance>(),
+                Array.Empty<MagpieRunningInstance>(),
+                Array.Empty<MagpieRunningInstance>(),
+            ]),
+        };
+        Exception? clearedOutcome = null;
+        try
+        {
+            await new FourKayLaunchService(
+                    new FakeProcessDiscoveryService(),
+                    new FakeWindowDiscoveryService(),
+                    FakeWindowPlacementService.Create4K(),
+                    clearedConfig,
+                    clearedMagpie,
+                    new FakeScalingWindowInspector())
+                .AttachExistingAsync(new FourKayAttachRequest
+                {
+                    EqDirectory = client.EqDirectory,
+                    MagpieDirectory = @"C:\BundledMagpie",
+                    Filter = ScalingFilter.Fsr,
+                }).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            // Later stages need window and process fakes this test does not
+            // supply, so the attach still fails. Only the preflight outcome is
+            // under test here: it must no longer be the reason for stopping.
+            clearedOutcome = exception;
+        }
+
+        Assert.Equal(1, clearedMagpie.ShutdownCalls);
+        Assert.False(
+            clearedOutcome is DedicatedMagpieConfigReloadRequiredException,
+            "A stale engine that quits must stop blocking the launch.");
     }
 
     private static async Task ReplacementAfterOwnedExitRemainsUntouchedAsync()
